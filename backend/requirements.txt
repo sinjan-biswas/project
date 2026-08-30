@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+redis
+celery
+sqlalchemy
+psycopg2-binary
+python-jose
+passlib
+httpx
+fastmrz
+opencv-python-headless
+numpy
