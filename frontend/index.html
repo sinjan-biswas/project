@@ -10,7 +10,6 @@
 </head>
 <body>
     <div class="app-container">
-        <!-- Header -->
         <header class="header">
             <div class="header-left">
                 <div class="logo">
@@ -25,9 +24,7 @@
             </div>
         </header>
 
-        <!-- Main Content -->
         <div class="main-content">
-            <!-- Left Panel - Document Upload -->
             <div class="panel panel-left">
                 <div class="panel-header">
                     <h2><i class="fas fa-passport"></i> Document Upload</h2>
@@ -37,8 +34,8 @@
                     <div class="upload-zone" id="uploadZone">
                         <i class="fas fa-cloud-upload-alt upload-icon"></i>
                         <p class="upload-text">Drop your document here or click to browse</p>
-                        <p class="upload-hint">Supports JPG, PNG, PDF</p>
-                        <input type="file" id="fileInput" accept="image/*,.pdf" hidden>
+                        <p class="upload-hint">Supports JPG, PNG</p>
+                        <input type="file" id="fileInput" accept="image/*" hidden>
                         <button class="btn btn-primary" id="uploadBtn">
                             <i class="fas fa-upload"></i> Choose File
                         </button>
@@ -56,7 +53,6 @@
                 </div>
             </div>
 
-            <!-- Center Panel - Face Capture -->
             <div class="panel panel-center">
                 <div class="panel-header">
                     <h2><i class="fas fa-user"></i> Face Capture</h2>
@@ -89,7 +85,6 @@
                 </div>
             </div>
 
-            <!-- Right Panel - Results -->
             <div class="panel panel-right">
                 <div class="panel-header">
                     <h2><i class="fas fa-chart-bar"></i> Results</h2>
@@ -106,7 +101,6 @@
             </div>
         </div>
 
-        <!-- Action Bar -->
         <div class="action-bar">
             <button class="btn btn-success btn-lg" id="screenBtn" disabled>
                 <i class="fas fa-play"></i> Start Screening
@@ -116,13 +110,11 @@
             </div>
         </div>
 
-        <!-- Footer -->
         <footer class="footer">
             <p>© 2026 AI Border Screening System | Secure & Compliant</p>
         </footer>
     </div>
 
     <script src="js/app.js"></script>
-    <script src="js/face-capture.js"></script>
 </body>
 </html>
