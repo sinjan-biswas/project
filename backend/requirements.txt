@@ -7,3 +7,9 @@ numpy
 pillow
 pytesseract
 fastmrz
+insightface
+onnxruntime           # for CPU
+# onnxruntime-gpu     # for GPU (uncomment if you have NVIDIA GPU)
+opencv-python-headless
+numpy
+pillow
