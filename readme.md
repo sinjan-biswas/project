@@ -12,9 +12,11 @@ AI Border Screening is a local web application for passport or identity-document
 
 ## Project Layout
 ```text
+readme.md
 backend/
   main.py                 FastAPI application
-  requirements.txt        Python dependencies
+  pyproject.toml          Python project metadata and dependencies
+  requirements.txt        Alternative pip dependency list
   services/               OCR, validation, face, and tampering services
   risk_engine/            Risk scoring logic
 frontend/
@@ -25,23 +27,24 @@ frontend/
 ```
 
 ## Requirements
-- Python 3.9 or newer
+- `uv` 0.12 or newer
+- Python 3.12 or newer
 - Tesseract OCR installed and available on PATH
 - A browser with camera access
 - Optional: NVIDIA GPU and the GPU ONNX Runtime package for GPU inference
 
 ## Setup
-1. Create and activate a virtual environment from the project root:
+1. Install `uv` if it is not already available:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-2. Install backend dependencies:
+2. Install the locked backend dependencies. `uv sync` creates and manages the backend virtual environment automatically:
 
 ```bash
-pip install -r backend/requirements.txt
+cd backend
+uv sync
 ```
 
 3. Install Tesseract OCR if it is not already installed. On Debian or Ubuntu:
@@ -52,27 +55,29 @@ sudo apt install tesseract-ocr
 ```
 
 ## Running the Application
-Start the API in one terminal:
+Start the API in one terminal from the backend directory:
 
 ```bash
 cd backend
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 The API will be available at:
 
 `http://localhost:8000`
 
-Start the frontend in a second terminal:
+Start the frontend in a second terminal from the frontend directory:
 
 ```bash
 cd frontend
-python server.py
+uv run --no-project python server.py
 ```
 
 Open the web interface at:
 
 `http://localhost:3000`
+
+To check that the API is running, open `http://localhost:8000/health`.
 
 ## Use the Interface
 1. Open the frontend URL in a browser.
@@ -123,3 +128,8 @@ curl -X POST http://localhost:8000/api/v2/screen \
 - Uploaded document bytes are processed temporarily for tampering analysis and the temporary file is removed afterward.
 - AI model initialization may take time on the first backend startup.
 - Do not use this development configuration directly in production without adding authentication, restricted CORS origins, secure deployment, logging controls, and data-retention safeguards.
+
+## Troubleshooting
+- If OCR fails, verify that `tesseract --version` works in the same environment used to start the API.
+- If face verification cannot initialize, check that the InsightFace model is available under `backend/models/insightface/`.
+- Camera access generally requires a secure browser context. `localhost` is supported by modern browsers.
