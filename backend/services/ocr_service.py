@@ -25,35 +25,118 @@ class OCRService:
             nparr = np.frombuffer(image_bytes, np.uint8)
             image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if image is None:
-                return {"error": "Invalid image format", "success": False}
+                return self._empty_result(error="Invalid image format")
 
-            text = pytesseract.image_to_string(image, lang=self.lang)
+            variants = self._ocr_variants(image)
+            name, text = max(variants, key=lambda v: self._content_score(v[1]))
+
             mrz_data = self._parse_mrz_from_text(text)
             mrz_data["success"] = True
-            mrz_data["engine"] = "Tesseract-eng"
-            mrz_data["raw_text"] = text[:500]
+            mrz_data["engine"] = f"Tesseract-eng ({name})"
+            mrz_data["raw_text"] = text[:4000]
             return mrz_data
         except Exception as e:
-            return self._get_fallback_data(str(e))
+            return self._empty_result(error=str(e))
+
+    @staticmethod
+    def _empty_result(error=None):
+        return {
+            "success": False,
+            "error": error,
+            "engine": "Tesseract-eng",
+            "raw_text": "",
+            "mrz_parsed": False,
+            "mrz_type": None,
+            "mrz_line": None,
+            "document_type": None,
+            "country_code": None,
+            "surname": None,
+            "given_names": None,
+            "document_number": None,
+            "nationality": None,
+            "date_of_birth": None,
+            "sex": None,
+            "date_of_expiry": None,
+        }
+
+    def _ocr_variants(self, image):
+        out = []
+        base_cfg = "--oem 3 --dpi 300"
+
+        try:
+            out.append(("raw-psm3", pytesseract.image_to_string(
+                image, lang=self.lang, config=f"{base_cfg} --psm 3")))
+        except Exception:
+            pass
+
+        try:
+            out.append(("raw-psm11", pytesseract.image_to_string(
+                image, lang=self.lang, config=f"{base_cfg} --psm 11")))
+        except Exception:
+            pass
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        try:
+            out.append(("gray-psm3", pytesseract.image_to_string(
+                gray, lang=self.lang, config=f"{base_cfg} --psm 3")))
+        except Exception:
+            pass
+
+        try:
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            eq = clahe.apply(gray)
+            out.append(("clahe-psm3", pytesseract.image_to_string(
+                eq, lang=self.lang, config=f"{base_cfg} --psm 3")))
+        except Exception:
+            pass
+
+        try:
+            _, otsu = cv2.threshold(gray, 0, 255,
+                                    cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            if 0.02 < (otsu > 127).mean() < 0.98:
+                out.append(("otsu-psm11", pytesseract.image_to_string(
+                    otsu, lang=self.lang, config=f"{base_cfg} --psm 11")))
+        except Exception:
+            pass
+
+        if not out:
+            out.append(("none", ""))
+        return out
+
+    def _content_score(self, text: str) -> int:
+        s = 0
+        s += 10 * len(re.findall(r"\d{4}\s?\d{4}\s?\d{4}", text))
+        s += 10 * len(re.findall(r"\d{3}\s?\d{4}\s?\d{4}", text))
+        s +=  8 * len(re.findall(r"[A-Z]{5}\d{4}[A-Z]", text))
+        s +=  8 * len(re.findall(r"\b[A-Z]{3}\d{7}\b", text))
+        s +=  5 * len(re.findall(r"\d{2}/\d{2}/\d{4}", text))
+        s +=  5 * len(re.findall(r"\b(?:19|20)\d{2}\b", text))
+        s +=  3 * len(re.findall(r"[A-Z0-9<]{20,}", text))
+        s +=  1 * len(re.findall(r"[A-Za-z]{3,}", text))
+        return s
 
     def _parse_mrz_from_text(self, text):
         data = {
-            "mrz_type": "TD3",
-            "document_type": "P",
-            "country_code": "UNKNOWN",
-            "surname": "UNKNOWN",
-            "given_names": "UNKNOWN",
-            "document_number": "UNKNOWN",
-            "nationality": "UNKNOWN",
-            "date_of_birth": "UNKNOWN",
-            "sex": "UNKNOWN",
-            "date_of_expiry": "UNKNOWN",
+            "mrz_parsed": False,
+            "mrz_type": None,
+            "mrz_line": None,
+            "document_type": None,
+            "country_code": None,
+            "surname": None,
+            "given_names": None,
+            "document_number": None,
+            "nationality": None,
+            "date_of_birth": None,
+            "sex": None,
+            "date_of_expiry": None,
         }
 
         lines = [line.strip() for line in text.split('\n') if line.strip()]
 
         for line in lines:
             line_upper = line.upper()
+
             if "SURNAME" in line_upper:
                 parts = re.split(r"[:. ]+", line)
                 if len(parts) > 1:
@@ -84,8 +167,11 @@ class OCRService:
                     break
 
         if mrz_line and len(mrz_line) >= 30:
-            doc_num = self._clean_document_number(mrz_line[0:9])
-            data["document_number"] = doc_num
+            data["mrz_parsed"] = True
+            data["mrz_line"] = mrz_line
+            data["mrz_type"] = "TD3"
+
+            data["document_number"] = self._clean_document_number(mrz_line[0:9])
 
             if len(mrz_line) >= 13:
                 data["nationality"] = self._clean_country_code(mrz_line[10:13])
@@ -95,68 +181,46 @@ class OCRService:
 
             if len(mrz_line) >= 21:
                 sex_char = mrz_line[20:21]
-                data["sex"] = sex_char if sex_char in ("M", "F") else "M"
+                data["sex"] = sex_char if sex_char in ("M", "F") else None
 
             if len(mrz_line) >= 27:
                 data["date_of_expiry"] = self._clean_expiry(mrz_line[21:27])
 
-        return self._validate_and_fill_missing(data)
+            if mrz_line[0:1] in ("P", "V", "I", "A", "C"):
+                data["document_type"] = mrz_line[0:1]
+
+        return data
 
     def _clean_document_number(self, doc_num):
-        replacements = {"A": "4", "B": "8", "O": "0", "D": "0", "S": "5", "Z": "2", "G": "6", "T": "1", "I": "1", "M": "1", "N": "1", "R": "1"}
-        return "".join(replacements.get(c, c) if c.isalpha() else c for c in doc_num)
+        replacements = {"A": "4", "B": "8", "O": "0", "D": "0", "S": "5",
+                        "Z": "2", "G": "6", "T": "1", "I": "1", "M": "1",
+                        "N": "1", "R": "1"}
+        cleaned = "".join(replacements.get(c, c) if c.isalpha() else c for c in doc_num)
+        cleaned = cleaned.replace("<", "").strip()
+        return cleaned if len(cleaned) >= 5 else None
 
     def _clean_country_code(self, code):
         code = re.sub(r"[^A-Z]", "", code.upper())
         if len(code) >= 3:
             return code[:3]
-        common_map = {"US": "USA", "UK": "GBR", "CA": "CAN", "AU": "AUS", "DE": "DEU", "FR": "FRA", "IT": "ITA", "JP": "JPN", "CN": "CHN", "IN": "IND", "BR": "BRA", "RU": "RUS"}
-        return common_map.get(code, "USA")
+        common_map = {"US": "USA", "UK": "GBR", "CA": "CAN", "AU": "AUS",
+                      "DE": "DEU", "FR": "FRA", "IT": "ITA", "JP": "JPN",
+                      "CN": "CHN", "IN": "IND", "BR": "BRA", "RU": "RUS"}
+        return common_map.get(code)
 
     def _clean_dob(self, dob_str):
-        char_map = {"A": "4", "B": "4", "O": "0", "D": "0", "S": "5", "Z": "2", "G": "6", "T": "1", "I": "1", "M": "1", "N": "1", "R": "1"}
+        char_map = {"A": "4", "B": "4", "O": "0", "D": "0", "S": "5",
+                    "Z": "2", "G": "6", "T": "1", "I": "1", "M": "1",
+                    "N": "1", "R": "1"}
         cleaned = "".join(char_map.get(c, c) if c.isalpha() else c for c in dob_str.upper())
         digits = re.sub(r"[^0-9]", "", cleaned)
-        return digits[:6] if len(digits) >= 6 else "900101"
+        return digits[:6] if len(digits) >= 6 else None
 
     def _clean_expiry(self, expiry_str):
         expiry_str = expiry_str.upper().replace("M", "2")
-        char_map = {"A": "4", "B": "8", "O": "0", "D": "0", "S": "5", "Z": "2", "G": "6", "T": "1", "I": "1", "N": "1", "R": "1"}
+        char_map = {"A": "4", "B": "8", "O": "0", "D": "0", "S": "5",
+                    "Z": "2", "G": "6", "T": "1", "I": "1", "N": "1",
+                    "R": "1"}
         cleaned = "".join(char_map.get(c, c) if c.isalpha() else c for c in expiry_str)
         digits = re.sub(r"[^0-9]", "", cleaned)
-        return digits[:6] if len(digits) >= 6 else "250101"
-
-    def _validate_and_fill_missing(self, data):
-        defaults = {
-            "date_of_birth": "900101",
-            "date_of_expiry": "250101",
-            "document_number": "123456789",
-            "nationality": "USA",
-            "sex": "M",
-            "country_code": "USA",
-            "document_type": "P",
-        }
-        for key, default in defaults.items():
-            if not data.get(key) or data[key] == "UNKNOWN" or (key in ("date_of_birth", "date_of_expiry") and len(data[key]) != 6):
-                data[key] = default
-            if key == "document_number" and len(data[key]) < 6:
-                data[key] = default
-        return data
-
-    def _get_fallback_data(self, error_msg):
-        return {
-            "success": False,
-            "error": error_msg,
-            "engine": "fallback",
-            "mrz_type": "TD3",
-            "document_type": "P",
-            "country_code": "USA",
-            "surname": "DOE",
-            "given_names": "JOHN",
-            "document_number": "123456789",
-            "nationality": "USA",
-            "date_of_birth": "900101",
-            "sex": "M",
-            "date_of_expiry": "250101",
-            "note": "Using fallback data for testing",
-        }
+        return digits[:6] if len(digits) >= 6 else None
