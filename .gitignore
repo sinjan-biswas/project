@@ -33,3 +33,6 @@ uploads/
 node_modules/
 dist/
 build/
+models/
+static/
+tests/
