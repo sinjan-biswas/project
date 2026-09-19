@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+import re
 
 
 class ValidationService:
@@ -61,8 +62,42 @@ class ValidationService:
 
         if doc_type == "passport":
             return self._validate_passport(fields)
+        if doc_type == "aadhaar":
+            return self._validate_aadhaar(fields)
         return self._validate_generic(doc_type, fields)
 
+    # ------------------------------------------------------------------
+    #  Aadhaar — new: checksum + pattern plausibility
+    # ------------------------------------------------------------------
+    def _validate_aadhaar(self, fields: dict) -> dict:
+        errors = []
+
+        for req in self.REQUIRED["aadhaar"]:
+            if self._is_null(fields.get(req)):
+                errors.append(f"Missing {req}")
+
+        num = fields.get("aadhaar_number")
+        if isinstance(num, str) and num.isdigit() and len(num) == 12:
+            if not self._verhoeff_ok(num):
+                errors.append(
+                    "Aadhaar number fails Verhoeff checksum "
+                    "(likely forged or OCR-misread)"
+                )
+            elif self._is_trivial_aadhaar(num):
+                errors.append(
+                    "Aadhaar number has a trivial sequential/repeated "
+                    "pattern (inconsistent with a real issued number)"
+                )
+
+        return {
+            "valid": not errors,
+            "errors": errors,
+            "document_type": "aadhaar",
+            "expiry_date": None,
+        }
+
+    # ------------------------------------------------------------------
+    #  Passport (unchanged)
     # ------------------------------------------------------------------
     def _validate_passport(self, fields: dict) -> dict:
         errors = []
@@ -81,7 +116,8 @@ class ValidationService:
             errors.extend(self._check_date_field(dob_str, "DOB",
                                                  future_ok=True))
 
-        doc_num = fields.get("passport_number") or fields.get("document_number")
+        doc_num = (fields.get("passport_number")
+                   or fields.get("document_number"))
         if doc_num and doc_num in self.blacklist_db:
             errors.append("Document blacklisted")
 
@@ -92,6 +128,8 @@ class ValidationService:
             "expiry_date": fields.get("date_of_expiry"),
         }
 
+    # ------------------------------------------------------------------
+    #  Generic (unchanged)
     # ------------------------------------------------------------------
     def _validate_generic(self, doc_type: str, fields: dict) -> dict:
         errors = []
@@ -123,10 +161,43 @@ class ValidationService:
         }
 
     # ------------------------------------------------------------------
-    # Date helpers — strict. No silent MM/DD swaps, no invented values.
+    #  Aadhaar-specific helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _verhoeff_ok(num: str) -> bool:
+        if not (isinstance(num, str) and len(num) == 12 and num.isdigit()):
+            return False
+        d = [[0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],
+             [2,3,4,0,1,7,8,9,5,6],[3,4,0,1,2,8,9,5,6,7],
+             [4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
+             [6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],
+             [8,7,6,5,9,3,2,1,0,4],[9,8,7,6,5,4,3,2,1,0]]
+        p = [[0,1,2,3,4,5,6,7,8,9],[1,5,7,6,2,8,3,0,9,4],
+             [5,8,0,3,7,9,6,1,4,2],[8,9,1,6,0,4,3,5,2,7],
+             [9,4,5,3,1,2,6,8,7,0],[4,2,8,6,5,7,3,9,0,1],
+             [2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]]
+        c = 0
+        for i, ch in enumerate(reversed(num)):
+            c = d[c][p[(i + 1) % 8][int(ch)]]
+        return c == 0
+
+    @staticmethod
+    def _is_trivial_aadhaar(num: str) -> bool:
+        """Catch obviously-fabricated numbers: all-same, repeats,
+        ascending, descending, constant-difference sequences."""
+        if len(set(num)) == 1:
+            return True
+        if num[:6] == num[6:]:
+            return True
+        diffs = [(int(num[i + 1]) - int(num[i])) % 10 for i in range(11)]
+        if all(d == diffs[0] for d in diffs):
+            return True
+        return False
+
+    # ------------------------------------------------------------------
+    #  Date helpers (unchanged)
     # ------------------------------------------------------------------
     def _check_date_field(self, val, label: str, future_ok: bool):
-        """Dispatch to MRZ (6-digit) or ISO (YYYY-MM-DD) checker."""
         if isinstance(val, str) and len(val) == 6 and val.isdigit():
             return self._check_mrz_date(val, label, future_ok)
         return self._check_iso_date(val, label, future_ok=future_ok)
@@ -161,7 +232,6 @@ class ValidationService:
         return errors
 
     def _normalize_date(self, date_str: str):
-        """Return ISO YYYY-MM-DD or None. Never returns the raw input."""
         if not date_str:
             return None
         for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
