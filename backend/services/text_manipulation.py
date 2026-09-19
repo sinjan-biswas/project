@@ -1,68 +1,117 @@
-import cv2
+# backend/services/text_manipulation.py
+#
+# Rewritten to consume DualOCREngine output instead of pytesseract.
+# Zero external OCR dependency — the OCR pass already happened upstream.
+#
+# Detection idea (unchanged from the original):
+#   Authentic documents have uniformly high OCR confidence across text
+#   regions. Spliced/painted text creates LOCALIZED confidence drops,
+#   because pasted text has different anti-aliasing, ink density and
+#   JPEG compression than its surroundings.
+
 import numpy as np
-import pytesseract
-from pytesseract import Output
 
 
 class TextManipulationDetector:
+    """Detects text tampering from OCR confidence distribution.
+
+    Input:  ocr_lines — list of dicts with keys 'box', 'text', 'confidence'
+            (the shape produced by DualOCREngine.extract_lines).
+
+    If ocr_lines is empty or has too few words, returns available=False
+    and text_score=0.0. Never fabricates a score.
     """
-    Detects text tampering using OCR confidence variance.
-    Authentic documents have uniform OCR confidence across text regions.
-    Spliced/painted text creates local confidence anomalies.
-    """
 
-    def __init__(self, low_conf_threshold: int = 60):
-        self.low_conf_threshold = low_conf_threshold
+    LOW_CONF_THRESHOLD = 0.60   # TrOCR/Paddle confidences are 0..1
 
-    def detect(self, image_path: str) -> dict:
-        img = cv2.imread(str(image_path))
-        if img is None:
-            return {"text_score": 0.0, "available": False}
+    def detect(self, image_path, ocr_lines=None) -> dict:
+        # NOTE: image_path is kept in the signature for API compatibility
+        # with the old call site, but we no longer read the image — the
+        # OCR pass already gave us what we need.
+        lines = ocr_lines or []
+        if len(lines) < 10:
+            return {
+                "text_score": 0.0,
+                "available": False,
+                "reason": f"too few lines ({len(lines)})",
+            }
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        data = pytesseract.image_to_data(gray, output_type=Output.DICT)
-
-        confs = np.array([c for c in data["conf"] if c != "-1"], dtype=float)
+        confs = np.array(
+            [float(l.get("confidence", 0.0)) for l in lines],
+            dtype=float,
+        )
         if confs.size < 10:
-            return {"text_score": 0.0, "available": False, "reason": "too little text"}
+            return {
+                "text_score": 0.0,
+                "available": False,
+                "reason": "too little text",
+            }
 
-        # Global statistics
-        mean_conf = confs.mean()
-        std_conf = confs.std()
-        low_conf_ratio = (confs < self.low_conf_threshold).mean()
+        # ---- Global statistics ---------------------------------------
+        mean_conf = float(confs.mean())
+        std_conf = float(confs.std())
+        low_conf_ratio = float((confs < self.LOW_CONF_THRESHOLD).mean())
 
-        # Local anomaly: bin word confidences into a coarse grid and measure
-        # spatial variance — real forgeries create localized confidence drops.
-        w, h = img.shape[1], img.shape[0]
-        grid = np.zeros((4, 4), dtype=float)
-        counts = np.zeros((4, 4), dtype=int)
-        for i, c in enumerate(data["conf"]):
-            if c == "-1":
-                continue
-            cx = data["left"][i] + data["width"][i] / 2
-            cy = data["top"][i] + data["height"][i] / 2
-            gx = min(3, int(cx / w * 4))
-            gy = min(3, int(cy / h * 4))
-            grid[gy, gx] += c
-            counts[gy, gx] += 1
+        # ---- Spatial variance: 4x4 grid on line centers --------------
+        spatial_var = self._spatial_variance(lines, confs)
 
-        valid = counts > 0
-        if valid.sum() < 2:
-            spatial_var = 0.0
-        else:
-            means = grid[valid] / counts[valid]
-            spatial_var = float(means.std())
-
-        # Fusion: high std + high low-conf ratio + high spatial variance → suspicious
-        score = min(1.0, (std_conf / 40.0) * 0.4
-                         + low_conf_ratio * 0.4
-                         + (spatial_var / 30.0) * 0.2)
+        # ---- Fusion (same weights as the original module) ------------
+        #   std_conf / 0.30   → normalised to roughly [0,1]
+        #   low_conf_ratio    → already [0,1]
+        #   spatial_var / 0.30 → normalised to roughly [0,1]
+        score = min(
+            1.0,
+            (std_conf / 0.30) * 0.4
+            + low_conf_ratio * 0.4
+            + (spatial_var / 0.30) * 0.2,
+        )
 
         return {
             "text_score": round(float(score), 3),
             "available": True,
-            "mean_confidence": round(float(mean_conf), 2),
-            "confidence_std": round(float(std_conf), 2),
-            "low_conf_ratio": round(float(low_conf_ratio), 3),
+            "mean_confidence": round(mean_conf, 3),
+            "confidence_std": round(std_conf, 3),
+            "low_conf_ratio": round(low_conf_ratio, 3),
             "spatial_variance": round(spatial_var, 3),
         }
+
+    # ------------------------------------------------------------------ #
+    def _spatial_variance(self, lines: list, confs: np.ndarray) -> float:
+        """Bin line confidences into a 4x4 grid (by box center),
+        then return the std-dev of the per-cell means."""
+        # Collect centers
+        centers = []
+        for ln in lines:
+            box = ln.get("box")
+            if not box:
+                continue
+            try:
+                xs = [float(p[0]) for p in box]
+                ys = [float(p[1]) for p in box]
+            except (TypeError, ValueError, IndexError):
+                continue
+            centers.append(((min(xs) + max(xs)) / 2,
+                            (min(ys) + max(ys)) / 2))
+        if len(centers) != len(confs):
+            # Box / confidence count mismatch — skip spatial term
+            return 0.0
+
+        cx = np.array([c[0] for c in centers])
+        cy = np.array([c[1] for c in centers])
+        w = float(cx.max() - cx.min()) or 1.0
+        h = float(cy.max() - cy.min()) or 1.0
+
+        gx = np.clip(((cx - cx.min()) / w * 4).astype(int), 0, 3)
+        gy = np.clip(((cy - cy.min()) / h * 4).astype(int), 0, 3)
+
+        grid = np.zeros((4, 4), dtype=float)
+        counts = np.zeros((4, 4), dtype=int)
+        for i in range(len(confs)):
+            grid[gy[i], gx[i]] += confs[i]
+            counts[gy[i], gx[i]] += 1
+
+        valid = counts > 0
+        if valid.sum() < 2:
+            return 0.0
+        means = grid[valid] / counts[valid]
+        return float(means.std())
