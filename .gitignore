@@ -33,7 +33,7 @@ uploads/
 node_modules/
 dist/
 build/
-models/
+insightface/
 static/
 tests/
 data/
