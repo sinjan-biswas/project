@@ -21,7 +21,7 @@ HEATMAP_DIR = STATIC_DIR / "heatmaps"
 HEATMAP_DIR.mkdir(parents=True, exist_ok=True)   # ensure exists BEFORE mount
 
 # 1. Create the app FIRST
-app = FastAPI(title="AI Border Screening API", version="2.0.0")
+app = FastAPI(title="AI Border Screening API", version="2.1.0")
 
 # 2. Middleware
 app.add_middleware(
@@ -51,13 +51,24 @@ async def screen_traveler(
     doc_bytes = await document.read()
     live_bytes = await live_photo.read()
 
-    mrz_data = ocr.extract(doc_bytes)
-    if not mrz_data.get("success"):
-        raise HTTPException(status_code=400, detail=f"OCR failed: {mrz_data.get('error')}")
+    # ---------------------------------------------------------------- #
+    # 1. OCR — unified service (new pipeline with legacy fallback)
+    # ---------------------------------------------------------------- #
+    ocr_data = ocr.extract(doc_bytes)
+    if not ocr_data.get("success"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"OCR failed: {ocr_data.get('error', 'unknown')}",
+        )
 
-    validation = validator.validate_mrz(mrz_data)
+    # ---------------------------------------------------------------- #
+    # 2. Validation — new dispatcher (handles both old/new OCR output)
+    # ---------------------------------------------------------------- #
+    validation = validator.validate(ocr_data)
 
-    # Tampering analysis on temp file
+    # ---------------------------------------------------------------- #
+    # 3. Tampering analysis on temp file
+    # ---------------------------------------------------------------- #
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp.write(doc_bytes)
         temp_path = tmp.name
@@ -66,8 +77,14 @@ async def screen_traveler(
     finally:
         os.unlink(temp_path)
 
+    # ---------------------------------------------------------------- #
+    # 4. Face verification
+    # ---------------------------------------------------------------- #
     face_result = face_verify.verify(doc_bytes, live_bytes)
 
+    # ---------------------------------------------------------------- #
+    # 5. Risk scoring (unchanged interface)
+    # ---------------------------------------------------------------- #
     is_expired = any("expired" in e.lower() for e in validation["errors"])
     risk = scorer.calculate(
         tampering_score=tampering_result["tampering_score"],
@@ -76,9 +93,17 @@ async def screen_traveler(
         is_expired=is_expired,
     )
 
+    # ---------------------------------------------------------------- #
+    # 6. Response — strip heavy OCR lines unless DEBUG_OCR=true
+    # ---------------------------------------------------------------- #
+    include_ocr_lines = os.getenv("DEBUG_OCR", "false").lower() == "true"
+    if not include_ocr_lines:
+        ocr_data = {k: v for k, v in ocr_data.items() if k != "ocr_lines"}
+
     return {
         "screening_id": uuid.uuid4().hex[:16],
-        "ocr_data": mrz_data,
+        "document_type": ocr_data.get("document_type"),
+        "ocr_data": ocr_data,
         "validation": validation,
         "tampering": tampering_result,
         "biometrics": face_result,
@@ -89,7 +114,7 @@ async def screen_traveler(
 
 @app.get("/health")
 def health():
-    return {"status": "operational", "version": "2.0.0"}
+    return {"status": "operational", "version": "2.1.0"}
 
 
 if __name__ == "__main__":

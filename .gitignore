@@ -36,3 +36,4 @@ build/
 models/
 static/
 tests/
+data/

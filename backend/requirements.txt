@@ -5,11 +5,12 @@ pydantic
 opencv-python-headless
 numpy
 pillow
-pytesseract
+paddleocr>=2.7.0
 fastmrz
 insightface
 onnxruntime           # for CPU
 # onnxruntime-gpu     # for GPU (uncomment if you have NVIDIA GPU)
-opencv-python-headless
-numpy
-pillow
+transformers>=4.35.0
+torch>=2.14.0
+torchvision>=0.29.0
+grad-cam>=1.5.7
