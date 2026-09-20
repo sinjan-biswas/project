@@ -106,7 +106,7 @@ class EnhancementService:
             return image_bytes, False
 
         current = image_bytes
-        changed + False
+        changed = False
         m = quality.get("metrics", {})
 
         # Dewarp / rectify if tilted or blurry
