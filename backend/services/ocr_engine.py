@@ -70,6 +70,31 @@ class DualOCREngine:
         return out
 
     # ------------------------------------------------------------------ #
+    #  NEW — cheap PaddleOCR-only confidence probe (used by quality gate)
+    # ------------------------------------------------------------------ #
+    def probe_confidence(self, image) -> float:
+        """
+        Returns mean PaddleOCR recognition confidence over all detected
+        lines, normalised to 0..1. Returns 0.0 on any failure or when no
+        text is detected.
+
+        Deliberately does NOT run TrOCR — that is reserved for
+        extract_lines() so real OCR stays fast for the common case.
+        """
+        try:
+            pairs = self._paddle_ocr(image)
+        except Exception:
+            return 0.0
+
+        if not pairs:
+            return 0.0
+
+        confs = [float(conf) for _box, _text, conf in pairs if conf is not None]
+        if not confs:
+            return 0.0
+        return sum(confs) / len(confs)
+
+    # ------------------------------------------------------------------ #
     #  Main entry
     # ------------------------------------------------------------------ #
     def extract_lines(self, image) -> list[dict]:

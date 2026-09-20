@@ -12,6 +12,23 @@ class OCRService:
         self.classifier = DocumentClassifier()
         # NOTE: pytesseract legacy fallback REMOVED. Do not re-add it.
 
+    # ------------------------------------------------------------------ #
+    #  NEW — quality-gate probe (Paddle-only, no deskew, no TrOCR)
+    # ------------------------------------------------------------------ #
+    def probe_confidence(self, image_bytes: bytes) -> float:
+        """
+        Cheap confidence probe used by ImageQualityGate.
+
+        - Decodes WITHOUT deskewing so the gate can still see tilt.
+        - Delegates to DualOCREngine.probe_confidence (PaddleOCR only).
+        - Returns 0.0 on any failure — never raises.
+        """
+        try:
+            image = decode_image(image_bytes)
+        except ValueError:
+            return 0.0
+        return self.engine.probe_confidence(image)
+
     def extract(self, image_bytes: bytes) -> dict:
         # ---- 0. Preprocess -------------------------------------------
         try:

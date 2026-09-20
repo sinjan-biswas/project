@@ -1,3 +1,4 @@
+
 class RiskScorer:
     """Weighted risk scoring with hard override for unreadable OCR."""
 
@@ -13,6 +14,12 @@ class RiskScorer:
 
     FACE_DISTANCE_SCALE = 1.0  # tune to your embedding distance range
 
+    # --- NEW: enhancement / quality tuning knobs ---
+    ENHANCEMENT_RISK = 25.0        # flat penalty when image needed enhancement
+    QUALITY_FLOOR    = 70.0        # quality below this starts adding risk
+    QUALITY_SLOPE    = 0.5         # risk per point below the floor
+    ENHANCEMENT_MULT = 0.5         # scale factor applied to the extra risk
+
     def calculate(
         self,
         tampering_score: float,
@@ -20,6 +27,8 @@ class RiskScorer:
         validation_errors: list,
         is_expired: bool,
         ocr_failed: bool = False,
+        image_enhanced: bool = False,   # NEW
+        image_quality: float = 100.0,   # NEW
     ) -> dict:
         reasons = []
 
@@ -51,18 +60,38 @@ class RiskScorer:
         if is_expired:
             reasons.append("Document expired")
 
+        # --- NEW: enhancement & image-quality risk signals ---
+        # Images that required heavy enhancement are a weak tamper signal
+        # (attackers degrade scans to hide edits) and a low-trust OCR signal.
+        enhancement_risk = self.ENHANCEMENT_RISK if image_enhanced else 0.0
+        quality_risk = max(0.0, (self.QUALITY_FLOOR - image_quality) * self.QUALITY_SLOPE)
+
+        if enhancement_risk or quality_risk:
+            total += (enhancement_risk + quality_risk) * self.ENHANCEMENT_MULT
+
+        if image_enhanced:
+            reasons.append("Image required enhancement")
+        if image_quality < self.QUALITY_FLOOR:
+            reasons.append(f"Low image quality ({image_quality:.1f})")
+
         if ocr_failed:
             total = max(total, 55.0)
             reasons.append("OCR unreadable")
 
         total = round(min(total, 100.0), 2)
 
+        # --- Decision (must be computed BEFORE the enhancement cap) ---
         if total < self.APPROVE_THRESHOLD:
             decision = "APPROVE"
         elif total <= self.DENY_THRESHOLD:
             decision = "SECONDARY_INSPECTION"
         else:
             decision = "DENY"
+
+        # --- NEW: cap – enhanced images can never auto-APPROVE ---
+        if image_enhanced and decision == "APPROVE":
+            decision = "SECONDARY_INSPECTION"
+            reasons.append("Enhanced image cannot auto-approve")
 
         return {
             "score": total,

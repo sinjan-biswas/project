@@ -68,6 +68,20 @@ class PANParser(DocumentParser):
                 continue
             if len(t) < 5:
                 continue
+ 
+            # Reject OCR garbage that slips past the blacklist and
+            # shape checks: a genuine name token of 3+ letters
+            # (transliterated to English on an Indian ID) essentially
+            # always contains at least one vowel. A word with no
+            # vowel at all — e.g. "WRCHY" — is almost always a
+            # misread heading, watermark, or security-pattern
+            # artifact rather than a real name, and would otherwise
+            # win a name/father_name slot ahead of the real names on
+            # the card. Short tokens (<=2 chars, e.g. initials like
+            # "MD") are exempt since real initials can lack vowels.
+            if any(len(w) >= 3 and not re.search(r"[aeiouAEIOU]", w)
+                   for w in words):
+                continue
+ 
             candidates.append(t.title())
         return candidates
- 

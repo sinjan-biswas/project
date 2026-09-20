@@ -1,6 +1,8 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
+from services.image_quality_service import ImageQualityGate
+from services.enhancement_service import EnhancementService
 import uuid
 import tempfile
 import os
@@ -31,6 +33,8 @@ validator = ValidationService()
 tampering = TamperingDetector()
 face_verify = FaceVerificationService()
 scorer = RiskScorer()
+quality_gate = ImageQualityGate(ocr_probe=ocr.probe_confidence)
+enhancer = EnhancementService(enabled=True)
 
 
 async def _read_upload(upload: UploadFile, label: str) -> bytes:
@@ -58,6 +62,37 @@ async def screen_traveler(
     doc_bytes = await _read_upload(document, "document")
     live_bytes = await _read_upload(live_photo, "live_photo")
 
+    # ---- NEW: Layer 1 – Quality Gate --------------------------------
+    quality = quality_gate.assess(doc_bytes)
+    if quality["decision"] == "reject":
+        raise HTTPException(status_code=422, detail={
+            "error": "image_quality_rejected",
+            "quality_score": quality["score"],
+            "metrics": quality["metrics"],
+            "fix_instructions": quality["reasons"],   # e.g. ["too dark", "tilted 23°"]
+        })
+
+    # ---- NEW: Layer 2 – Enhancement Retry ---------------------------
+    was_enhanced = False
+    if quality["decision"] == "enhance":
+        try:
+            doc_bytes = await enhancer.enhance(doc_bytes, quality)
+            was_enhanced = True
+        except Exception as e:
+            raise HTTPException(status_code=422, detail={
+                "error": "enhancement_failed",
+                "fix_instructions": quality["reasons"],
+            })
+
+        # Re-check after enhancement
+        quality = quality_gate.assess(doc_bytes)
+        if quality["decision"] == "reject":
+            raise HTTPException(status_code=422, detail={
+                "error": "still_unreadable_after_enhancement",
+                "fix_instructions": quality["reasons"],
+            })
+
+
     # ---- 1. OCR ------------------------------------------------------
     # OCR failure is no longer HTTP 400 — it becomes a screening result
     # that is forced to SECONDARY_INSPECTION below.
@@ -67,6 +102,9 @@ async def screen_traveler(
         ocr_data = {"success": False, "error": f"OCR exception: {e}"}
 
     ocr_failed = not ocr_data.get("success", False)
+
+    ocr_data["image_quality"] = quality["score"]
+    ocr_data["image_enhanced"] = was_enhanced
 
     # ---- 2. Validation ----------------------------------------------
     if ocr_failed:
@@ -111,6 +149,8 @@ async def screen_traveler(
         validation_errors=validation.get("errors", []),
         is_expired=is_expired,
         ocr_failed=ocr_failed,
+        image_enhanced=was_enhanced,      
+        image_quality=quality["score"],
     )
 
     # HARD RULE: unreadable OCR can never come out APPROVE.

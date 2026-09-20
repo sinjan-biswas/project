@@ -8,6 +8,9 @@ __pycache__/
 .venv
 venv/
 env/
+**/.venv/
+**/venv/
+list/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
@@ -28,6 +31,26 @@ tmp/
 uploads/
 *.db
 *.sqlite3
+*.db-wal
+*.db-shm
+
+# Local caches and sensitive test documents
+.cache/
+backend/.cache/
+backend/*.jpg
+backend/*.jpeg
+backend/*.png
+
+# Downloaded or generated ML weights
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+*.safetensors
+**/pretrained_models/
+**/model_pretrained/
+**/weights/
 
 # Frontend dependencies / build output
 node_modules/
