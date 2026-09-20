@@ -42,7 +42,10 @@ TOOLS = {
         "pip_target": "requirements.txt",
         "fallback_deps": None,
         "python_version": "3.10",
-        "requirement_fixes": {},
+        "requirement_fixes": {
+            r"^torch==1\.13\.0\+cu117$":       "torch==1.13.0",
+            r"^torchvision==0\.14\.0\+cu117$": "torchvision==0.14.0",
+        },
         "post_install_cmds": [],
     },
     "zero_dce": {
@@ -66,7 +69,7 @@ TOOLS = {
         "dir": "Real-ESRGAN",
         "inference_cmd": (
             "./venv/bin/python inference_realesrgan.py "
-            "-n RealESRGAN_x4plus -i {inp} -o {out}"
+            "-n RealESRGAN_x4plus -i {inp} -o {out} -t 256" 
         ),
         "pip_target": "requirements.txt",
         "fallback_deps": None,
@@ -98,26 +101,33 @@ class EnhancementService:
     # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
-    async def enhance(self, image_bytes: bytes, quality: dict) -> bytes:
+    async def enhance(self, image_bytes: bytes, quality: dict) -> tuple[bytes, bool]:
         if not self.enabled:
-            return image_bytes
+            return image_bytes, False
 
         current = image_bytes
+        changed + False
         m = quality.get("metrics", {})
 
         # Dewarp / rectify if tilted or blurry
         if abs(m.get("skew_deg", 0)) > 8 or m.get("blur_var", 999) < 150:
-            current = await self._run("dewarp", current)
+            new = await self._run("dewarp", current)
+            changed = changed or (new != current)
+            current = new
 
         # Low-light enhancement if too dark
         if m.get("dark_pct", 0) > 40:
-            current = await self._run("zero_dce", current)
+            new = await self._run("zero_dce", current)
+            changed = changed or (new != current)
+            current = new
 
         # Upscale / deblur if resolution is low or still blurry
         if m.get("width", 2000) < 1000 or m.get("blur_var", 999) < 120:
-            current = await self._run("esrgan", current)
+            new = await self._run("esrgan", current)
+            changed = changed or (new != current)
+            current = new
 
-        return current
+        return current, changed
 
     async def warmup(self) -> dict:
         """Pre-install every tool. Safe to call at startup."""

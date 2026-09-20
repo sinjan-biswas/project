@@ -76,14 +76,12 @@ async def screen_traveler(
     was_enhanced = False
     if quality["decision"] == "enhance":
         try:
-            doc_bytes = await enhancer.enhance(doc_bytes, quality)
-            was_enhanced = True
+            doc_bytes, was_enhanced = await enhancer.enhance(doc_bytes, quality)
         except Exception as e:
             raise HTTPException(status_code=422, detail={
                 "error": "enhancement_failed",
                 "fix_instructions": quality["reasons"],
             })
-
         # Re-check after enhancement
         quality = quality_gate.assess(doc_bytes)
         if quality["decision"] == "reject":
