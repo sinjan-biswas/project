@@ -23,23 +23,28 @@ class VisaParser(DocumentParser):
                       text, re.I)
         if m:
             f["visa_number"] = m.group(1).upper()
+ 
         m = re.search(r"TYPE[.:\s]*([A-Z]\d?)", text, re.I)
         if m:
             f["visa_type"] = m.group(1).upper()
+ 
         m = re.search(
             r"\b(ENTRIES?[.:\s]*\w+|DOUBLE|MULTIPLE|SINGLE)\b", text, re.I)
         if m:
             f["entries"] = m.group(1).split()[-1].upper()
+ 
         m = re.search(r"STAY[.:\s]*(\d+)\s*(DAYS?|MONTHS?)", text, re.I)
         if m:
             n = int(m.group(1))
             f["stay_duration_days"] = n * (
                 30 if "MONTH" in m.group(2).upper() else 1)
+ 
         m = re.search(
             r"(?:VALID\s*(?:FROM|BETWEEN)?)[.:\s]*"
             r"(\d{2}[./-]\d{2}[./-]\d{2,4})", text, re.I)
         if m:
             f["valid_from"] = m.group(1)
+ 
         m = re.search(
             r"(?:UNTIL|EXPIRY|VALID\s*TILL)[.:\s]*"
             r"(\d{2}[./-]\d{2}[./-]\d{2,4})", text, re.I)
@@ -70,6 +75,16 @@ class VisaParser(DocumentParser):
             if not (2 <= len(words) <= 4):
                 continue
             if len(t) < 5:
+                continue
+            # Reject OCR garbage that slips past the blacklist and
+            # shape checks: a genuine name token of 3+ letters
+            # essentially always contains at least one vowel. A word
+            # with no vowel at all is almost always a misread of a
+            # heading, watermark, or security-pattern artifact, not a
+            # real name. Short tokens (<=2 chars, e.g. initials) are
+            # exempt.
+            if any(len(w) >= 3 and not re.search(r"[aeiouAEIOU]", w)
+                   for w in words):
                 continue
             return t.title()
         return None

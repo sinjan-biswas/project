@@ -117,6 +117,16 @@ class PassportParser(DocumentParser):
                 continue
             if len(t) < 5:
                 continue
+            # Reject OCR garbage that slips past the blacklist and
+            # shape checks: a genuine name token of 3+ letters
+            # essentially always contains at least one vowel. A word
+            # with no vowel at all is almost always a misread of a
+            # heading, watermark, or security-pattern artifact, not a
+            # real name. Short tokens (<=2 chars, e.g. initials) are
+            # exempt.
+            if any(len(w) >= 3 and not re.search(r"[aeiouAEIOU]", w)
+                   for w in words):
+                continue
             return t.title()
         return None
  
@@ -131,4 +141,3 @@ class PassportParser(DocumentParser):
                     and not candidates[i + 1].startswith("P<")):
                 return candidates[i], candidates[i + 1]
         return None
- 

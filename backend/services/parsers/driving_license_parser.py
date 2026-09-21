@@ -40,7 +40,6 @@ class DrivingLicenseParser(DocumentParser):
             r"(\d{2}[-/.]\d{2}[-/.]\d{4})", text, re.I)
         if m:
             f["date_of_birth"] = m.group(1)
- 
         dates = re.findall(r"\d{2}[-/.]\d{2}[-/.]\d{4}", text)
         if f["date_of_birth"] is None and dates:
             f["date_of_birth"] = dates[0]
@@ -53,7 +52,6 @@ class DrivingLicenseParser(DocumentParser):
             f["vehicle_class"] = m.group(1).strip()
  
         f["name"] = self._find_name(lines)
- 
         return self._finalize(f, 0.7)
  
     def _find_name(self, lines: list):
@@ -69,6 +67,15 @@ class DrivingLicenseParser(DocumentParser):
                 continue
             if len(t) < 5:
                 continue
+            # Reject OCR garbage that slips past the blacklist and
+            # shape checks: a genuine name token of 3+ letters
+            # essentially always contains at least one vowel. A word
+            # with no vowel at all is almost always a misread of a
+            # heading, watermark, or security-pattern artifact, not a
+            # real name. Short tokens (<=2 chars, e.g. initials) are
+            # exempt.
+            if any(len(w) >= 3 and not re.search(r"[aeiouAEIOU]", w)
+                   for w in words):
+                continue
             candidates.append(t.title())
         return candidates[0] if candidates else None
- 

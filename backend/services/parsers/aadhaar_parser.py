@@ -1,12 +1,12 @@
 import re
 from collections import Counter
 from .base import DocumentParser
-
-
+ 
+ 
 class AadhaarParser(DocumentParser):
     document_type = "aadhaar"
     REQUIRED_FIELDS = ["aadhaar_number", "name"]
-
+ 
     # Lines that are definitely NOT a person's name
     _NAME_BLACKLIST = re.compile(
         r"aadhaar|uidai|gov|india|government|details|address|"
@@ -15,24 +15,24 @@ class AadhaarParser(DocumentParser):
         r"verification|scanning|offline|citizenship|date",
         re.I,
     )
-
+ 
     # Junk tokens that OCR often produces on Aadhaar cards
     _JUNK_TOKENS = {"SIL", "3TR", "HAAR", "WWWWWWWW", "RM", "DIST", "PO"}
-
+ 
     def parse(self, lines, full_text):
         f = {"name": None, "aadhaar_number": None,
              "date_of_birth": None, "gender": None}
         text = "\n".join(l["text"] for l in lines)
-
+ 
         # ---------- DOB -----------------------------------------------
         # Found first so its digits can be excluded from Aadhaar-number
         # fragment merging below (see _find_aadhaar_number).
         f["date_of_birth"] = self._find_dob(text)
-
+ 
         # ---------- Aadhaar number (multi-strategy) -------------------
         f["aadhaar_number"] = self._find_aadhaar_number(
             text, lines, dob=f["date_of_birth"])
-
+ 
         # ---------- Gender --------------------------------------------
         m = re.search(r"\b(MALE|FEMALE|TRANSGENDER|पुरुष|महिला)\b",
                       text, re.I)
@@ -43,12 +43,12 @@ class AadhaarParser(DocumentParser):
             elif tok in ("महिला",):
                 tok = "FEMALE"
             f["gender"] = tok
-
+ 
         # ---------- Name (filtered + spatially aware) -----------------
         f["name"] = self._find_name(lines)
-
+ 
         return self._finalize(f, 0.85)
-
+ 
     # ================================================================== #
     #  DOB extraction — handles OCR transpositions of "DOB"
     # ================================================================== #
@@ -63,19 +63,19 @@ class AadhaarParser(DocumentParser):
             text, re.I)
         if m:
             return m.group(1)
-
+ 
         # Strategy 2: any well-formed date on the card (Aadhaar has only DOB)
         m = re.search(r"\b(\d{2}[\-/]\d{2}[\-/]\d{4})\b", text)
         if m:
             return m.group(1)
-
+ 
         # Strategy 3: date split across lines by OCR, e.g. "08/01/" + "1995"
         m = re.search(r"(\d{2}[\-/]\d{2}[\-/])\s*\n\s*(\d{4})", text)
         if m:
             return m.group(1) + m.group(2)
-
+ 
         return None
-
+ 
     # ================================================================== #
     #  Name extraction — reject junk, prefer spatial position
     # ================================================================== #
@@ -92,9 +92,9 @@ class AadhaarParser(DocumentParser):
             # Reject known junk tokens
             if t.upper() in self._JUNK_TOKENS:
                 continue
-
+ 
             words = t.split()
-
+ 
             # OCR sometimes merges a printed name into one CamelCase
             # token with no spaces (e.g. "ElonMusk" instead of
             # "Elon Musk"). If we see a single word that cleanly
@@ -108,7 +108,7 @@ class AadhaarParser(DocumentParser):
                         and sum(len(p) for p in camel_parts) == len(words[0])):
                     words = camel_parts
                     t = " ".join(words)
-
+ 
             # Aadhaar names are 2-4 words; single-word names are rare
             # and usually OCR junk like "SIL"
             if not (2 <= len(words) <= 4):
@@ -119,6 +119,17 @@ class AadhaarParser(DocumentParser):
             # Each word should be at least 2 chars (initials like "J."
             # are possible but rare on Aadhaar)
             if any(len(w) < 2 for w in words if w not in ("S", "K")):
+                continue
+            # Reject OCR garbage that slips past the blacklist and
+            # shape checks: a genuine name token of 3+ letters
+            # essentially always contains at least one vowel. A word
+            # with no vowel at all (e.g. "PKY", misread from a
+            # disclaimer paragraph or watermark) is almost always OCR
+            # noise, not a real name — and without this check it can
+            # outscore and displace the actual printed name. Short
+            # tokens (<=2 chars, e.g. initials) are exempt.
+            if any(len(w) >= 3 and not re.search(r"[aeiouAEIOU]", w)
+                   for w in words):
                 continue
             # Score: prefer lines in the upper 40% of the card
             # (name is printed near the photo, upper-middle area)
@@ -140,15 +151,15 @@ class AadhaarParser(DocumentParser):
             if 2 <= len(words) <= 3:
                 score += 0.3
             candidates.append((score, idx, t))
-
+ 
         if not candidates:
             return None
-
+ 
         # Highest score wins; tie-break by earliest line (top of card)
         candidates.sort(key=lambda x: (-x[0], x[1]))
         best = candidates[0][2]
         return best.title()
-
+ 
     # ================================================================== #
     #  Aadhaar number extraction — spatial fragment merging
     # ================================================================== #
@@ -156,7 +167,7 @@ class AadhaarParser(DocumentParser):
     # "08-01-1995". Lines that match this are date lines, not
     # Aadhaar-number lines, and must be excluded from fragment collection.
     _DATE_LINE_RE = re.compile(r"\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}")
-
+ 
     # Dominant weight applied per unit of OCR line-index gap when
     # scoring a fragment merge. The Aadhaar number's digit fragments
     # are always parts of the same printed field (same OCR line, or
@@ -167,16 +178,16 @@ class AadhaarParser(DocumentParser):
     # a reliable enough signal on its own to rule out a distant,
     # coincidentally-nearby cross-field merge.
     _LINE_GAP_WEIGHT = 5000
-
+ 
     def _find_aadhaar_number(self, text: str, lines: list, dob: str = None):
         """
         Aadhaar number extraction with spatial fragment merging.
-
+ 
         The Aadhaar number is printed in the LARGEST font on the card.
         When OCR fragments it, the fragments are the largest digit
         fragments and are spatially adjacent (same visual line or
         nearby lines on the same card side).
-
+ 
         Strategy:
         1. Try direct regex patterns (formatted/contiguous)
         2. Collect digit fragments with box coordinates, excluding
@@ -193,7 +204,7 @@ class AadhaarParser(DocumentParser):
             direct.append({"num": num, "font": 50, "dist": 0, "frags": 1})
         for m in re.finditer(r"\b(\d{12})\b", text):
             direct.append({"num": m.group(1), "font": 50, "dist": 0, "frags": 1})
-
+ 
         if direct:
             # If we found well-formatted numbers, use consensus
             counts = Counter(d["num"] for d in direct)
@@ -203,7 +214,7 @@ class AadhaarParser(DocumentParser):
             if len(direct) == 1:
                 return direct[0]["num"]
             # Multiple different candidates: fall through to spatial merging
-
+ 
         # ── Step 2: Collect fragments with spatial metadata ───────────
         frags = []
         for idx, ln in enumerate(lines):
@@ -212,7 +223,7 @@ class AadhaarParser(DocumentParser):
             # bare digit regex below would otherwise match them.
             if self._DATE_LINE_RE.search(ln["text"]):
                 continue
-
+ 
             box = ln.get("box")
             y_c = x_c = h = 0
             if box:
@@ -224,7 +235,7 @@ class AadhaarParser(DocumentParser):
                     h = max(ys) - min(ys)
                 except Exception:
                     pass
-
+ 
             t = ln["text"]
             for m in re.finditer(r"\b(\d{4,12})\b", t):
                 frags.append({
@@ -234,13 +245,13 @@ class AadhaarParser(DocumentParser):
                     "x": x_c,
                     "h": h or 10,
                 })
-
+ 
         if not frags:
             return None
-
+ 
         # ── Step 3: Spatial fragment merging ──────────────────────────
         candidates = []
-
+ 
         # 2-fragment merges
         for i, f1 in enumerate(frags):
             for j, f2 in enumerate(frags):
@@ -275,7 +286,7 @@ class AadhaarParser(DocumentParser):
                     "verhoeff": self._verhoeff_ok(merged),
                     "plausible": plausible,
                 })
-
+ 
         # 3-fragment merges (for 4+4+4 splits)
         for i, f1 in enumerate(frags):
             for j, f2 in enumerate(frags):
@@ -300,10 +311,10 @@ class AadhaarParser(DocumentParser):
                         "verhoeff": self._verhoeff_ok(merged),
                         "plausible": plausible,
                     })
-
+ 
         if not candidates:
             return None
-
+ 
         # ── Step 4: Score ─────────────────────────────────────────────
         # Key: spatial proximity is the STRONGEST signal.
         # Fragments of the same number are on the same visual line.
@@ -327,10 +338,10 @@ class AadhaarParser(DocumentParser):
                 s *= 0.2                          # fraud-heuristic penalty
             s *= (4.0 - c["frags"])               # fewer fragments better
             return s
-
+ 
         candidates.sort(key=score, reverse=True)
         return candidates[0]["num"]
-
+ 
     # ================================================================== #
     #  Plausibility check for 12-digit candidates
     # ================================================================== #
@@ -368,7 +379,7 @@ class AadhaarParser(DocumentParser):
         if all(d == diffs[0] for d in diffs):
             return False
         return True
-
+ 
     # ================================================================== #
     #  Verhoeff checksum (kept as tiebreaker, not hard gate)
     # ================================================================== #
