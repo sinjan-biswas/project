@@ -203,8 +203,7 @@ npm install
 **Terminal 1 — Backend:**
 ```bash
 cd backend
-source .venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 **Terminal 2 — Frontend:**

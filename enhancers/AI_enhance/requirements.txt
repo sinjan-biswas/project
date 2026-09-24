@@ -1,0 +1,5 @@
+numpy
+opencv-python
+pillow
+tqdm
+ai-edge-litert

@@ -18,7 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
 
       if (data.status === "operational" || data.status === "ok") {
-        setConnected(`Connected  v${data.version || "2.2.0"}`);
+        setConnected(`Connected  v${data.version || "3.0.0"}`);
       } else {
         setDisconnected("Unexpected status");
       }
@@ -70,14 +70,12 @@ document.addEventListener("DOMContentLoaded", () => {
       if (target) {
         e.preventDefault();
         target.scrollIntoView({ behavior: "smooth", block: "start" });
-        // Close mobile menu if open
         const navLinks = document.querySelector(".nav-links");
         if (navLinks) navLinks.classList.remove("active");
       }
     });
   });
 
-  // CTA buttons: "Scan Document" → #dashboard, "Start Screening" → trigger or scroll
   document.querySelectorAll("[data-scroll-to]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -125,7 +123,6 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function handleFile(file) {
-    // Mirrors ALLOWED_MIME and MAX_UPLOAD_BYTES in the FastAPI service.
     const validTypes = ["image/jpeg", "image/png", "image/webp"];
     if (!validTypes.includes(file.type)) {
       showToast("Invalid file type. Please upload a JPEG, PNG, or WebP image.", "error");
@@ -145,7 +142,6 @@ document.addEventListener("DOMContentLoaded", () => {
         uploadPreview.src = e.target.result;
         uploadPreview.style.display = "block";
       }
-      // Hide the upload prompt text, show filename
       if (dropZone) {
         const prompt = dropZone.querySelector(".upload-prompt");
         if (prompt) prompt.style.display = "none";
@@ -165,11 +161,36 @@ document.addEventListener("DOMContentLoaded", () => {
     reader.readAsDataURL(file);
   }
 
-  // ─── 4. Camera / Face Capture ────────────────────────────────
-  // The React camera component emits only the user-approved photo.
-  window.addEventListener("camera-photo-ready", (event) => {
-    window._livePhoto = event.detail;
-    showToast("Face photo selected for screening.", "success");
+  // ─── 4. Liveness gate ────────────────────────────────────────
+  // The widget emits this once the flow ends — either with a signed
+  // verification token (all checks passed) OR with unverified=true
+  // (face-match failed, user chose to continue anyway).
+  window.addEventListener("liveness-verified", (event) => {
+    const detail = event.detail || {};
+    window._livePhoto = detail.livePhoto || null;
+    window._verificationId = detail.verificationId || null;
+    window._livenessUnverified = !!detail.unverified;
+
+    if (detail.unverified) {
+      showToast(
+        "Liveness completed without face match — screening will still proceed.",
+        "info"
+      );
+    } else {
+      showToast("Liveness verified — traveller identity confirmed.", "success");
+    }
+
+    const screenBtn = document.getElementById("screenBtn");
+    if (screenBtn) screenBtn.disabled = false;
+
+    const hint = document.getElementById("livenessHint");
+    if (hint) hint.style.display = "none";
+
+    // Auto-start screening once the widget hands us the live frame.
+    // Guard so we don't double-fire if the user re-runs the liveness flow.
+    if (window._livePhoto && window._docFile) {
+      runScreening();
+    }
   });
 
   // ─── 5. Run Screening ────────────────────────────────────────
@@ -182,7 +203,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     if (!window._livePhoto) {
-      showToast("Please capture a face photo first.", "error");
+      showToast("Complete the liveness check first (a live frame is required).", "error");
       return;
     }
 
@@ -190,7 +211,6 @@ document.addEventListener("DOMContentLoaded", () => {
     formData.append("document", window._docFile);
     formData.append("live_photo", window._livePhoto, "live.jpg");
 
-    // Show loading state
     await checkHealth();
     if (screenBtn) {
       screenBtn.disabled = true;
@@ -219,6 +239,7 @@ document.addEventListener("DOMContentLoaded", () => {
       showToast(`Screening failed: ${err.message}`, "error");
     } finally {
       if (screenBtn) {
+        // Re-enable unconditionally — liveness no longer gates rescreening.
         screenBtn.disabled = false;
         screenBtn.textContent = screenBtn.dataset.originalText || "Start Screening";
       }
@@ -239,31 +260,22 @@ document.addEventListener("DOMContentLoaded", () => {
     const isTampered = tamper.is_tampered === true;
     const tamperScore = typeof tamper.tampering_score === "number" ? tamper.tampering_score : 0;
     const isValid = valid.valid === true || valid.is_valid === true;
-    const faceMatch = face.match === true || face.is_match === true;
-    const similarity = typeof face.similarity === "number" ? face.similarity : (typeof face.confidence === "number" ? face.confidence : 0);
 
     const riskLevel = risk.risk_level || risk.level || deriveRiskLevel(tamperScore);
     const riskScore = typeof risk.score === "number" ? risk.score : (typeof risk.risk_score === "number" ? risk.risk_score : tamperScore);
-    const riskDecision = risk.decision || risk.recommendation || (riskLevel === "HIGH" ? "DENY" : riskLevel === "MEDIUM" ? "REVIEW" : "ALLOW");
 
-    // ── Signals Panel ──
     updateSignal("signalEla", !isTampered, "Error Level Analysis (ELA)");
-    updateSignal(
-      "signalMicroPrint",
-      tamperScore < 0.5,
-      "Micro-Print & Guilloche Waves"
-    );
+    updateSignal("signalMicroPrint", tamperScore < 0.5, "Micro-Print & Guilloche Waves");
     updateSignal("signalMrz", isValid, "MRZ Optical Checksum Parity");
 
-    // ── Tamper Risk Panel ──
     const tamperScoreEl = document.getElementById("tamperScore");
     const tamperLevelEl = document.getElementById("tamperLevel");
     const tamperDescEl = document.getElementById("tamperDesc");
 
     if (tamperScoreEl) tamperScoreEl.textContent = tamperScore.toFixed(2);
     if (tamperLevelEl) {
-      tamperLevelEl.textContent = `${riskLevel.toUpperCase()} RISK`;
-      tamperLevelEl.className = `risk-badge risk-${riskLevel.toLowerCase()}`;
+      tamperLevelEl.textContent = `${String(riskLevel).toUpperCase()} RISK`;
+      tamperLevelEl.className = `risk-badge risk-${String(riskLevel).toLowerCase()}`;
     }
     if (tamperDescEl) {
       tamperDescEl.textContent = getRiskDescription(riskLevel, tamperScore);
@@ -276,34 +288,11 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateSignal(id, passed, label) {
     const el = document.getElementById(id);
     if (!el) return;
-
     const badge = el.querySelector(".signal-badge") || el;
     badge.className = `signal-badge ${passed ? "pass" : "fail"}`;
     badge.textContent = passed ? "PASS" : "FAIL";
-
     el.classList.remove("pass", "fail");
     el.classList.add(passed ? "pass" : "fail");
-  }
-
-  function buildCard(title, icon, body) {
-    return `
-      <div class="result-card fade-in-up visible">
-        <div class="result-card-header">
-          <span class="result-icon">${icon}</span>
-          <h4>${title}</h4>
-        </div>
-        <div class="result-card-body">
-          ${body}
-        </div>
-      </div>`;
-  }
-
-  function buildErrorList(errors) {
-    if (!Array.isArray(errors) || errors.length === 0) return "";
-    return `
-      <ul class="error-list">
-        ${errors.map((e) => `<li>${escapeHtml(typeof e === "string" ? e : e.message || JSON.stringify(e))}</li>`).join("")}
-      </ul>`;
   }
 
   function deriveRiskLevel(score) {
@@ -313,28 +302,14 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function getRiskDescription(level, score) {
-    if (level === "HIGH" || level === "high") {
+    const s = String(level).toLowerCase();
+    if (s === "high") {
       return `High tampering probability detected (${score.toFixed(2)}). Document should be flagged for manual review.`;
     }
-    if (level === "MEDIUM" || level === "medium") {
+    if (s === "medium") {
       return `Moderate anomalies detected (${score.toFixed(2)}). Additional verification recommended.`;
     }
     return `No significant tampering indicators found (${score.toFixed(2)}). Document appears authentic.`;
-  }
-
-  function formatTimestamp(ts) {
-    if (!ts) return new Date().toLocaleString();
-    try {
-      return new Date(ts).toLocaleString();
-    } catch {
-      return ts;
-    }
-  }
-
-  function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.appendChild(document.createTextNode(str));
-    return div.innerHTML;
   }
 
   // ─── 7. Intersection Observer for Animations ─────────────────
@@ -373,7 +348,6 @@ document.addEventListener("DOMContentLoaded", () => {
       );
     });
 
-    // Close menu when clicking outside
     document.addEventListener("click", (e) => {
       if (
         navLinks.classList.contains("active") &&
@@ -420,7 +394,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }, 4500);
   }
 
-  // Expose for inline onclick handlers if any
   window.runScreening = runScreening;
   window.showToast = showToast;
 });
