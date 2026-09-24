@@ -5,11 +5,11 @@ Lazy-install enhancement service.
 Pipeline order (cheap → expensive):
     dewarp   → rectifies tilted / warped documents
     zero_dce → brightens dark captures
-    esrgan   → 4x upscale + deblur
+    esrgan   → 2x upscale + deblur
 
-Dewarp runs through a warm HTTP server (127.0.0.1:8765) when available.
-Results are cached by SHA-256 of the input, so repeat screenings of the
-same document skip the entire enhancer pipeline.
+Dewarp and ESRGAN both run through warm HTTP servers (8765, 8766).
+Subprocess fallback exists for both if the servers are unreachable.
+Results are cached by SHA-256 of the input.
 """
 
 import asyncio
@@ -22,21 +22,15 @@ import shutil
 import tempfile
 import urllib.request
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
 ENHANCERS = os.path.abspath(os.path.join(_HERE, "..", "..", "enhancers"))
 
 DEWARP_SERVER_URL = "http://127.0.0.1:8765"
+ESRGAN_SERVER_URL = "http://127.0.0.1:8766"
 
-# Cache directory for enhanced outputs
 _CACHE_DIR = "/tmp/enhancer_cache"
 os.makedirs(_CACHE_DIR, exist_ok=True)
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
 TOOLS = {
     "dewarp": {
         "repo_url": "https://github.com/xiaomore/Document-Image-Dewarping.git",
@@ -76,8 +70,8 @@ TOOLS = {
         "dir": "Real-ESRGAN",
         "inference_cmd": (
             "./venv/bin/python inference_realesrgan.py "
-            "-n RealESRGAN_x4plus -i {inp} -o {out} "
-            "-t 512 --fp32"
+            "-n RealESRGAN_x2plus -i {inp} -o {out} "
+            "-t 256 --fp32 -g 0"
         ),
         "pip_target": "requirements.txt",
         "fallback_deps": None,
@@ -95,7 +89,7 @@ TOOLS = {
 
 SETUP_TIMEOUT_S = 1800
 INFERENCE_TIMEOUT_S = 120
-DEWARP_HTTP_TIMEOUT_S = 15
+WARM_HTTP_TIMEOUT_S = 90
 
 
 class EnhancementService:
@@ -105,26 +99,21 @@ class EnhancementService:
         self._setup_locks: dict[str, asyncio.Lock] = {}
         self._lock_guard = asyncio.Lock()
 
-    # ------------------------------------------------------------------
-    # Public — with SHA-256 cache
-    # ------------------------------------------------------------------
     async def enhance(self, image_bytes: bytes, quality: dict) -> tuple[bytes, bool]:
         if not self.enabled:
             return image_bytes, False
 
-        # --- Cache lookup ---
         key = hashlib.sha256(image_bytes).hexdigest()
         cache_path = os.path.join(_CACHE_DIR, key + ".pkl")
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, "rb") as f:
                     cached = pickle.load(f)
-                print(f"[enhancer] cache HIT ({key[:12]}) — skipping dewarp/esrgan")
+                print(f"[enhancer] cache HIT ({key[:12]})")
                 return cached
             except Exception as e:
                 print(f"[enhancer] cache read failed ({e}), recomputing")
 
-        # --- Miss: run the pipeline ---
         current = image_bytes
         changed = False
         m = quality.get("metrics", {})
@@ -144,7 +133,6 @@ class EnhancementService:
             changed = changed or (new != current)
             current = new
 
-        # --- Cache write ---
         try:
             with open(cache_path, "wb") as f:
                 pickle.dump((current, changed), f)
@@ -165,9 +153,6 @@ class EnhancementService:
                 results[tool] = False
         return results
 
-    # ------------------------------------------------------------------
-    # Ensure a tool is cloned + has a working venv + marker
-    # ------------------------------------------------------------------
     async def _ensure_tool(self, tool: str) -> str:
         meta = TOOLS[tool]
         tool_dir = os.path.join(ENHANCERS, meta["dir"])
@@ -177,26 +162,19 @@ class EnhancementService:
             return tool_dir
 
         if not self.auto_setup:
-            raise RuntimeError(
-                f"{meta['dir']} is not set up at {tool_dir} "
-                f"and auto_setup is disabled."
-            )
+            raise RuntimeError(f"{meta['dir']} not set up at {tool_dir}")
 
         lock = await self._get_lock(tool)
         async with lock:
             if os.path.exists(marker):
                 return tool_dir
-
             os.makedirs(ENHANCERS, exist_ok=True)
 
             if not os.path.isdir(tool_dir):
                 print(f"[enhancer] cloning {meta['dir']} ...")
                 code = await self._shell(
-                    f"git clone {shlex.quote(meta['repo_url'])} "
-                    f"{shlex.quote(meta['dir'])}",
-                    cwd=ENHANCERS,
-                    timeout=SETUP_TIMEOUT_S,
-                )
+                    f"git clone {shlex.quote(meta['repo_url'])} {shlex.quote(meta['dir'])}",
+                    cwd=ENHANCERS, timeout=SETUP_TIMEOUT_S)
                 if code != 0:
                     raise RuntimeError(f"git clone failed for {meta['dir']}")
             else:
@@ -206,50 +184,30 @@ class EnhancementService:
             if not os.path.exists(venv_python):
                 py_ver = meta.get("python_version")
                 py_flag = f" --python {shlex.quote(py_ver)}" if py_ver else ""
-                print(f"[enhancer] creating venv for {meta['dir']} using uv"
-                      f"{f' (Python {py_ver})' if py_ver else ''} ...")
-                code = await self._shell(
-                    f"uv venv venv{py_flag}",
-                    cwd=tool_dir,
-                    timeout=SETUP_TIMEOUT_S,
-                )
+                print(f"[enhancer] creating venv for {meta['dir']} using uv ...")
+                code = await self._shell(f"uv venv venv{py_flag}",
+                                         cwd=tool_dir, timeout=SETUP_TIMEOUT_S)
                 if code != 0:
                     raise RuntimeError(f"uv venv failed for {meta['dir']}")
 
             pip_target = meta["pip_target"]
             req_path = os.path.join(tool_dir, pip_target)
-
             if os.path.exists(req_path):
                 install_rel = self._sanitize_requirements(
-                    req_path, meta.get("requirement_fixes") or {}
-                )
-                print(f"[enhancer] installing {install_rel} for {meta['dir']} "
-                      f"using uv (this can take several minutes) ...")
+                    req_path, meta.get("requirement_fixes") or {})
+                print(f"[enhancer] installing {install_rel} for {meta['dir']} ...")
                 code = await self._shell(
                     f"VIRTUAL_ENV=venv uv pip install -r {shlex.quote(install_rel)}",
-                    cwd=tool_dir,
-                    timeout=SETUP_TIMEOUT_S,
-                )
+                    cwd=tool_dir, timeout=SETUP_TIMEOUT_S)
                 if code != 0:
-                    raise RuntimeError(
-                        f"uv pip install failed for {meta['dir']} (see log above)"
-                    )
+                    raise RuntimeError(f"uv pip install failed for {meta['dir']}")
             elif meta.get("fallback_deps"):
                 deps = " ".join(shlex.quote(d) for d in meta["fallback_deps"])
-                print(f"[enhancer] no {pip_target} in {meta['dir']} — "
-                      f"installing fallback deps: {deps}")
                 code = await self._shell(
                     f"VIRTUAL_ENV=venv uv pip install {deps}",
-                    cwd=tool_dir,
-                    timeout=SETUP_TIMEOUT_S,
-                )
+                    cwd=tool_dir, timeout=SETUP_TIMEOUT_S)
                 if code != 0:
-                    raise RuntimeError(
-                        f"uv pip install (fallback) failed for {meta['dir']}"
-                    )
-            else:
-                print(f"[enhancer] WARNING: no {pip_target} in {meta['dir']} "
-                      f"and no fallback deps — skipping install")
+                    raise RuntimeError(f"uv pip install (fallback) failed for {meta['dir']}")
 
             for cmd in meta.get("post_install_cmds", []):
                 print(f"[enhancer] post-install patch for {meta['dir']}: {cmd}")
@@ -262,16 +220,11 @@ class EnhancementService:
             print(f"[enhancer] {meta['dir']} ready at {tool_dir}")
             return tool_dir
 
-    # ------------------------------------------------------------------
-    # Sanitize requirements.txt
-    # ------------------------------------------------------------------
     def _sanitize_requirements(self, req_path: str, fixes: dict) -> str:
         if not fixes:
             return os.path.basename(req_path)
-
         with open(req_path, "r") as f:
             lines = f.readlines()
-
         new_lines = []
         any_change = False
         for line in lines:
@@ -280,8 +233,7 @@ class EnhancementService:
             deleted = False
             for pat, repl in fixes.items():
                 if re.match(pat, stripped):
-                    print(f"[enhancer] rewriting requirements line: "
-                          f"{stripped!r} -> {repl!r}")
+                    print(f"[enhancer] rewriting: {stripped!r} -> {repl!r}")
                     replaced = repl
                     deleted = (repl == "")
                     any_change = True
@@ -289,28 +241,30 @@ class EnhancementService:
             if deleted:
                 continue
             new_lines.append(replaced + "\n")
-
         out_name = os.path.basename(req_path) + ".sanitized"
         out_path = os.path.join(os.path.dirname(req_path), out_name)
-
         if not any_change:
-            print(f"[enhancer] no requirement fixes matched in {req_path}, "
-                  f"using original")
-
+            print(f"[enhancer] no requirement fixes in {req_path}")
         with open(out_path, "w") as f:
             f.writelines(new_lines)
         return out_name
 
     # ------------------------------------------------------------------
-    # Run a tool on one image
+    # Run a tool — warm server first, subprocess fallback
     # ------------------------------------------------------------------
     async def _run(self, tool: str, img_bytes: bytes) -> bytes:
         if tool == "dewarp":
-            warm = await self._dewarp_via_server(img_bytes)
+            warm = await self._post_to_server(f"{DEWARP_SERVER_URL}/dewarp", img_bytes)
             if warm is not None:
-                print("[enhancer] dewarp via warm server (skip subprocess)")
+                print("[enhancer] dewarp via warm server")
                 return warm
-            print("[enhancer] dewarp-svc unreachable — falling back to subprocess")
+            print("[enhancer] dewarp-svc unreachable — subprocess fallback")
+        elif tool == "esrgan":
+            warm = await self._post_to_server(f"{ESRGAN_SERVER_URL}/esrgan", img_bytes)
+            if warm is not None:
+                print("[enhancer] esrgan via warm server")
+                return warm
+            print("[enhancer] esrgan-svc unreachable — subprocess fallback")
 
         try:
             tool_dir = await self._ensure_tool(tool)
@@ -322,7 +276,6 @@ class EnhancementService:
             inp = os.path.join(tmp, "in.jpg")
             out = os.path.join(tmp, "out")
             os.makedirs(out, exist_ok=True)
-
             with open(inp, "wb") as f:
                 f.write(img_bytes)
 
@@ -331,82 +284,61 @@ class EnhancementService:
                 os.makedirs(in_dir, exist_ok=True)
                 shutil.copy(inp, os.path.join(in_dir, "in.jpg"))
                 cmd = TOOLS[tool]["inference_cmd"].format(
-                    inp=shlex.quote(inp),
-                    out=shlex.quote(out),
-                )
+                    inp=shlex.quote(inp), out=shlex.quote(out))
                 cmd = cmd.replace(shlex.quote(inp) + ".in", shlex.quote(in_dir))
             else:
                 cmd = TOOLS[tool]["inference_cmd"].format(
-                    inp=shlex.quote(inp),
-                    out=shlex.quote(out),
-                )
+                    inp=shlex.quote(inp), out=shlex.quote(out))
 
             print(f"[enhancer] running {tool}: {cmd}")
-            code = await self._shell(cmd, cwd=tool_dir,
-                                     timeout=INFERENCE_TIMEOUT_S)
-
+            code = await self._shell(cmd, cwd=tool_dir, timeout=INFERENCE_TIMEOUT_S)
             if code != 0:
-                print(f"[enhancer] {tool} exited with code {code}, "
-                      f"returning original")
+                print(f"[enhancer] {tool} exited code {code}, returning original")
                 return img_bytes
 
-            produced = [
-                f for f in os.listdir(out)
-                if f.lower().endswith((".jpg", ".jpeg", ".png"))
-            ]
+            produced = [f for f in os.listdir(out)
+                        if f.lower().endswith((".jpg", ".jpeg", ".png"))]
             if not produced:
-                print(f"[enhancer] {tool} produced no output, "
-                      f"returning original")
+                print(f"[enhancer] {tool} produced no output")
                 return img_bytes
 
             with open(os.path.join(out, produced[0]), "rb") as f:
                 return f.read()
 
-    # ------------------------------------------------------------------
-    # Warm dewarp server client
-    # ------------------------------------------------------------------
-    async def _dewarp_via_server(self, img_bytes: bytes) -> bytes | None:
+    async def _post_to_server(self, url: str, img_bytes: bytes) -> bytes | None:
         def _sync_post() -> bytes | None:
-            boundary = "----dewarpboundary"
+            boundary = "----enhancerboundary"
             body = (
                 f"--{boundary}\r\n"
                 f'Content-Disposition: form-data; name="file"; filename="in.jpg"\r\n'
                 f"Content-Type: image/jpeg\r\n\r\n"
             ).encode() + img_bytes + f"\r\n--{boundary}--\r\n".encode()
             req = urllib.request.Request(
-                f"{DEWARP_SERVER_URL}/dewarp",
-                data=body,
-                headers={
-                    "Content-Type": f"multipart/form-data; boundary={boundary}"
-                },
+                url, data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=DEWARP_HTTP_TIMEOUT_S) as r:
+                with urllib.request.urlopen(req, timeout=WARM_HTTP_TIMEOUT_S) as r:
                     if r.status != 200:
-                        print(f"[enhancer] dewarp-svc status {r.status}")
+                        print(f"[enhancer] warm-svc status {r.status} on {url}")
                         return None
                     return r.read()
             except Exception as e:
-                print(f"[enhancer] dewarp-svc unreachable: {e}")
+                print(f"[enhancer] warm-svc unreachable ({url}): {e}")
                 return None
 
         return await asyncio.to_thread(_sync_post)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     async def _get_lock(self, tool: str) -> asyncio.Lock:
         async with self._lock_guard:
             if tool not in self._setup_locks:
                 self._setup_locks[tool] = asyncio.Lock()
             return self._setup_locks[tool]
 
-    async def _shell(self, cmd: str, cwd: str,
-                     timeout: float | None = None) -> int:
+    async def _shell(self, cmd: str, cwd: str, timeout: float | None = None) -> int:
         proc = await asyncio.create_subprocess_shell(
-            cmd,
-            cwd=cwd,
+            cmd, cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

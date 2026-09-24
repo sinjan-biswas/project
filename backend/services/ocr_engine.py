@@ -15,15 +15,28 @@ def _paddle_major_version() -> int:
         return 2
 
 
+def _paddle_cuda_available() -> bool:
+    try:
+        import paddle
+        return bool(paddle.device.is_compiled_with_cuda())
+    except Exception as e:
+        print(f"[ocr_engine] paddle CUDA check failed: {e}")
+        return False
+
+
 class DualOCREngine:
-    TROCR_CONF_THRESHOLD = 0.85   # only re-read lines below this confidence
+    TROCR_CONF_THRESHOLD = 0.70
 
     def __init__(self):
-        # PaddleOCR v2 vs v3 have different constructor + call signatures.
+        use_gpu = _paddle_cuda_available()
+        print(f"[ocr_engine] PaddleOCR gpu={use_gpu}, "
+              f"version_major={_paddle_major_version()}")
+
         if _paddle_major_version() >= 3:
             self.paddle = PaddleOCR(
                 use_textline_orientation=True,
                 lang="en",
+                device="gpu:0" if use_gpu else "cpu",
             )
             self._paddle_v3 = True
         else:
@@ -31,6 +44,7 @@ class DualOCREngine:
                 use_angle_cls=True,
                 lang="en",
                 show_log=False,
+                use_gpu=use_gpu,
             )
             self._paddle_v3 = False
 
@@ -43,14 +57,10 @@ class DualOCREngine:
         self.trocr.eval()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.trocr.to(self.device)
+        print(f"[ocr_engine] TrOCR device={self.device}")
 
-    # ------------------------------------------------------------------ #
-    #  PaddleOCR call — handles v2 and v3 return shapes
-    # ------------------------------------------------------------------ #
     def _paddle_ocr(self, image) -> list[tuple]:
-        """Return a flat list of (box, text, conf) tuples."""
         if self._paddle_v3:
-            # v3: predict() -> list of dicts with 'rec_texts', 'rec_scores', 'dt_polys'
             results = self.paddle.predict(image)
             out = []
             for page in results or []:
@@ -61,7 +71,6 @@ class DualOCREngine:
                     out.append((box, text, float(conf)))
             return out
 
-        # v2: ocr() -> list of [ [box, (text, conf)], ... ] per page
         raw = self.paddle.ocr(image, cls=True)
         out = []
         for page in raw or []:
@@ -69,59 +78,58 @@ class DualOCREngine:
                 out.append((box, text, float(conf)))
         return out
 
-    # ------------------------------------------------------------------ #
-    #  NEW — cheap PaddleOCR-only confidence probe (used by quality gate)
-    # ------------------------------------------------------------------ #
     def probe_confidence(self, image) -> float:
-        """
-        Returns mean PaddleOCR recognition confidence over all detected
-        lines, normalised to 0..1. Returns 0.0 on any failure or when no
-        text is detected.
-
-        Deliberately does NOT run TrOCR — that is reserved for
-        extract_lines() so real OCR stays fast for the common case.
-        """
         try:
             pairs = self._paddle_ocr(image)
         except Exception:
             return 0.0
-
         if not pairs:
             return 0.0
-
         confs = [float(conf) for _box, _text, conf in pairs if conf is not None]
         if not confs:
             return 0.0
         return sum(confs) / len(confs)
 
-    # ------------------------------------------------------------------ #
-    #  Main entry
-    # ------------------------------------------------------------------ #
     def extract_lines(self, image) -> list[dict]:
-        lines = []
-        for box, text, conf in self._paddle_ocr(image):
-            crop = self._crop_box(image, box)
-            # Only verify uncertain lines with TrOCR (CPU cost control)
+        paddle_pairs = self._paddle_ocr(image)
+
+        needs_trocr = []
+        lines: list[dict] = []
+        for box, text, conf in paddle_pairs:
+            idx = len(lines)
             if conf < self.TROCR_CONF_THRESHOLD:
-                trocr_text, trocr_conf = self._trocr_read(crop)
+                crop = self._crop_box(image, box)
+                needs_trocr.append((idx, crop))
+                trocr_text, trocr_conf = None, None
             else:
                 trocr_text, trocr_conf = "", 0.0
-
-            final, confidence = self._resolve(text, conf, trocr_text, trocr_conf)
             lines.append({
                 "box": box,
-                "text": final,
+                "text": text,
                 "paddle_text": text,
                 "paddle_conf": conf,
                 "trocr_text": trocr_text,
                 "trocr_conf": trocr_conf,
-                "confidence": confidence,
+                "confidence": conf,
             })
+
+        if needs_trocr:
+            crops = [c for _idx, c in needs_trocr]
+            trocr_results = self._trocr_read_batch(crops)
+            for (idx, _crop), (tt, tc) in zip(needs_trocr, trocr_results):
+                lines[idx]["trocr_text"] = tt
+                lines[idx]["trocr_conf"] = tc
+
+        for ln in lines:
+            final, conf = self._resolve(
+                ln["paddle_text"], ln["paddle_conf"],
+                ln["trocr_text"] or "", ln["trocr_conf"] or 0.0,
+            )
+            ln["text"] = final
+            ln["confidence"] = conf
+
         return lines
 
-    # ------------------------------------------------------------------ #
-    #  Helpers
-    # ------------------------------------------------------------------ #
     def _crop_box(self, image, box):
         xs = [int(p[0]) for p in box]
         ys = [int(p[1]) for p in box]
@@ -134,12 +142,17 @@ class DualOCREngine:
         return upscale_for_trocr(crop)
 
     @torch.inference_mode()
-    def _trocr_read(self, crop) -> tuple[str, float]:
-        if crop is None or crop.size == 0:
-            return "", 0.0
+    def _trocr_read_batch(self, crops: list) -> list[tuple[str, float]]:
+        valid = [(i, c) for i, c in enumerate(crops)
+                 if c is not None and getattr(c, "size", 0) > 0]
+        results: list[tuple[str, float]] = [("", 0.0)] * len(crops)
+        if not valid:
+            return results
 
-        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        inputs = self.trocr_proc(images=rgb, return_tensors="pt").to(self.device)
+        rgb_images = [cv2.cvtColor(c, cv2.COLOR_BGR2RGB) for _i, c in valid]
+        inputs = self.trocr_proc(
+            images=rgb_images, return_tensors="pt", padding=True,
+        ).to(self.device)
 
         out = self.trocr.generate(
             **inputs,
@@ -148,32 +161,31 @@ class DualOCREngine:
             return_dict_in_generate=True,
         )
 
-        text = self.trocr_proc.batch_decode(
-            out.sequences, skip_special_tokens=True
-        )[0].strip()
+        texts = self.trocr_proc.batch_decode(out.sequences, skip_special_tokens=True)
 
-        # Confidence = mean of per-step top-1 softmax probs (drops final EOS step)
-        conf = 0.0
+        confs: list[float] = []
         scores = getattr(out, "scores", None)
         if scores:
-            step_probs = []
-            for step_logits in scores:
-                probs = torch.softmax(step_logits, dim=-1)
-                step_probs.append(float(probs.max(dim=-1).values.mean()))
-            if step_probs:
-                conf = float(np.mean(step_probs[:-1])) if len(step_probs) > 1 \
-                    else float(step_probs[0])
+            step_probs = torch.stack(
+                [torch.softmax(s, dim=-1).max(dim=-1).values for s in scores],
+                dim=0,
+            )
+            if step_probs.shape[0] > 1:
+                step_probs = step_probs[:-1]
+            confs = step_probs.mean(dim=0).cpu().tolist()
+        else:
+            confs = [0.0] * len(texts)
 
-        return text, conf
+        for (orig_idx, _crop), text, conf in zip(valid, texts, confs):
+            results[orig_idx] = (text.strip(), float(conf))
+
+        return results
 
     def _resolve(self, paddle_text, paddle_conf, trocr_text, trocr_conf):
-        # Rule 1: agreement -> accept
         if paddle_text.strip().upper() == trocr_text.strip().upper() and trocr_text:
             return trocr_text, max(paddle_conf, trocr_conf)
-        # Rule 2: Paddle confident -> keep it
         if paddle_conf >= self.TROCR_CONF_THRESHOLD:
             return paddle_text, paddle_conf
-        # Rule 3: disagreement + Paddle unsure -> trust TrOCR
         if trocr_text:
             return trocr_text, trocr_conf
         return paddle_text, paddle_conf

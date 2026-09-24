@@ -13,6 +13,12 @@ The probe is intentionally PaddleOCR-only (not DualOCREngine) because:
 
 The probe also deliberately does NOT deskew — we want the gate to see
 the raw (possibly tilted) image so it can flag the tilt.
+
+Probe-skip policy:
+  The probe is expensive (~0.8–1.2s per call on CPU). It only runs when
+  the classical CV metrics are genuinely ambiguous. When the metrics are
+  clearly good (clean document) or clearly bad (too dark / too blurry),
+  the probe contributes nothing to the decision, so we skip it.
 """
 
 import cv2
@@ -85,9 +91,29 @@ class ImageQualityGate:
         # 4. Resolution
         low_res = w < self.min_width
 
-        # 5. PaddleOCR confidence probe (injected; returns 0..1)
+        # --- Decide whether the OCR probe is even worth running ------
+        cv_clearly_ok = (
+            blur_var >= self.blur_thresh * 1.5
+            and abs(skew_deg) <= self.skew_thresh_deg
+            and dark_pct <= self.dark_pct_thresh
+            and bright_pct <= 25.0
+            and not low_res
+        )
+        cv_clearly_bad = (
+            blur_var < self.blur_thresh * 0.5
+            and dark_pct > 70.0
+        )
+
+        # 5. PaddleOCR confidence probe — only when CV metrics are ambiguous
         avg_conf = 0.0
-        if self.ocr_probe is not None:
+        probe_skipped = False
+        if self.ocr_probe is None:
+            probe_skipped = True
+        elif cv_clearly_ok or cv_clearly_bad:
+            probe_skipped = True
+            print(f"[quality_gate] probe skipped "
+                  f"(cv_clearly_ok={cv_clearly_ok}, cv_clearly_bad={cv_clearly_bad})")
+        else:
             try:
                 avg_conf = float(self.ocr_probe(image_bytes)) * 100.0
             except Exception:
@@ -114,6 +140,7 @@ class ImageQualityGate:
             "width": int(w),
             "height": int(h),
             "ocr_conf": round(avg_conf, 1),
+            "probe_skipped": probe_skipped,
         }
 
         # --- Weighted 0–100 score ------------------------------------
@@ -132,12 +159,22 @@ class ImageQualityGate:
         score = max(0.0, round(score, 1))
 
         # --- Decision ------------------------------------------------
-        if reasons and (score < 40.0 or avg_conf < 30.0):
-            decision = "reject"
-        elif reasons:
-            decision = "enhance"
+        # When probe is skipped, we can't use avg_conf as a reject trigger.
+        # Fall back to CV-only decisions.
+        if probe_skipped:
+            if cv_clearly_bad or (reasons and score < 40.0):
+                decision = "reject"
+            elif reasons:
+                decision = "enhance"
+            else:
+                decision = "ok"
         else:
-            decision = "ok"
+            if reasons and (score < 40.0 or avg_conf < 30.0):
+                decision = "reject"
+            elif reasons:
+                decision = "enhance"
+            else:
+                decision = "ok"
 
         return {
             "decision": decision,

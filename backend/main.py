@@ -15,9 +15,8 @@ import tempfile
 import os
 import hashlib
 
-# ---- Screening services (flat layout) --------------------------------
 from services.image_quality_service import ImageQualityGate
-from services.enhancement_service import EnhancementService
+from services.enhancement_service import EnhancementService, _CACHE_DIR as ENHANCER_CACHE_DIR
 from services.ocr_service import OCRService
 from services.validation_service import ValidationService
 from services.face_service import FaceVerificationService
@@ -25,71 +24,89 @@ from services.tampering_service import TamperingDetector
 from risk_engine.scorer import RiskScorer
 from blockchain.client import FabricClient
 
-# ---- Liveness app (packaged under app/) ------------------------------
 from app.core.redis import redis_client
 from app.routers import liveness
 
 
 # ---------------------------------------------------------------------------
-# Dewarp warm-server management
+# Warm-server paths
 # ---------------------------------------------------------------------------
 _ROOT = Path(__file__).resolve().parent.parent
-_DEWARP_DIR = _ROOT / "enhancers" / "Document-Image-Dewarping"
-_DEWARP_PY = _DEWARP_DIR / "venv" / "bin" / "python"
+
+_DEWARP_DIR    = _ROOT / "enhancers" / "Document-Image-Dewarping"
+_DEWARP_PY     = _DEWARP_DIR / "venv" / "bin" / "python"
 _DEWARP_SCRIPT = _DEWARP_DIR / "dewarp_server.py"
 _DEWARP_HEALTH = "http://127.0.0.1:8765/health"
 
+_ESRGAN_DIR    = _ROOT / "enhancers" / "Real-ESRGAN"
+_ESRGAN_PY     = _ESRGAN_DIR / "venv" / "bin" / "python"
+_ESRGAN_SCRIPT = _ESRGAN_DIR / "esrgan_server.py"
+_ESRGAN_HEALTH = "http://127.0.0.1:8766/health"
+
 _dewarp_proc: subprocess.Popen | None = None
+_esrgan_proc: subprocess.Popen | None = None
 
 
-def _dewarp_already_up() -> bool:
+def _service_up(health_url: str) -> bool:
     try:
-        with urllib.request.urlopen(_DEWARP_HEALTH, timeout=0.5) as r:
+        with urllib.request.urlopen(health_url, timeout=0.5) as r:
             return r.status == 200
     except Exception:
         return False
 
 
-async def _wait_for_dewarp(timeout_s: float = 30.0) -> bool:
+async def _wait_for_service(health_url: str, timeout_s: float = 60.0) -> bool:
     deadline = asyncio.get_event_loop().time() + timeout_s
     while asyncio.get_event_loop().time() < deadline:
-        if await asyncio.to_thread(_dewarp_already_up):
+        if await asyncio.to_thread(_service_up, health_url):
             return True
         await asyncio.sleep(0.5)
     return False
 
 
-def _start_dewarp_server() -> subprocess.Popen | None:
-    if _dewarp_already_up():
-        print("[lifespan] dewarp-svc already running — reusing")
+def _spawn_service(py: Path, script: Path, cwd: Path, name: str,
+                   health_url: str) -> subprocess.Popen | None:
+    if _service_up(health_url):
+        print(f"[lifespan] {name} already running — reusing")
         return None
-    if not _DEWARP_PY.exists() or not _DEWARP_SCRIPT.exists():
-        print(f"[lifespan] dewarp-svc files missing at {_DEWARP_DIR} — skipping")
+    if not py.exists() or not script.exists():
+        print(f"[lifespan] {name} files missing at {cwd} — skipping")
         return None
-
-    print("[lifespan] starting dewarp warm server ...")
-    proc = subprocess.Popen(
-        [str(_DEWARP_PY), str(_DEWARP_SCRIPT)],
-        cwd=str(_DEWARP_DIR),
+    print(f"[lifespan] starting {name} ...")
+    return subprocess.Popen(
+        [str(py), str(script)],
+        cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
     )
-    return proc
 
 
-def _drain_dewarp_logs(proc: subprocess.Popen) -> None:
+def _drain_logs(proc: subprocess.Popen, prefix: str) -> None:
     def _reader():
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
-                print(f"[dewarp-svc] {line.rstrip()}")
+                print(f"{prefix} {line.rstrip()}")
         except Exception:
             pass
     import threading
-    t = threading.Thread(target=_reader, daemon=True)
-    t.start()
+    threading.Thread(target=_reader, daemon=True).start()
+
+
+def _stop(proc: subprocess.Popen | None, name: str) -> None:
+    if proc is None:
+        return
+    print(f"[lifespan] stopping {name} ...")
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -97,16 +114,23 @@ def _drain_dewarp_logs(proc: subprocess.Popen) -> None:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _dewarp_proc
+    global _dewarp_proc, _esrgan_proc
 
-    _dewarp_proc = _start_dewarp_server()
+    _dewarp_proc = _spawn_service(_DEWARP_PY, _DEWARP_SCRIPT, _DEWARP_DIR,
+                                  "dewarp-svc", _DEWARP_HEALTH)
     if _dewarp_proc is not None:
-        _drain_dewarp_logs(_dewarp_proc)
+        _drain_logs(_dewarp_proc, "[dewarp-svc]")
 
-    if await _wait_for_dewarp(timeout_s=30.0):
-        print("[lifespan] dewarp-svc healthy on 127.0.0.1:8765")
-    else:
-        print("[lifespan] dewarp-svc not reachable — enhancer will fall back to subprocess")
+    _esrgan_proc = _spawn_service(_ESRGAN_PY, _ESRGAN_SCRIPT, _ESRGAN_DIR,
+                                  "esrgan-svc", _ESRGAN_HEALTH)
+    if _esrgan_proc is not None:
+        _drain_logs(_esrgan_proc, "[esrgan-svc]")
+
+    ok_d = await _wait_for_service(_DEWARP_HEALTH, timeout_s=90.0)
+    ok_e = await _wait_for_service(_ESRGAN_HEALTH, timeout_s=60.0)
+    print(f"[lifespan] dewarp-svc healthy={ok_d}  esrgan-svc healthy={ok_e}")
+
+    _app.state.qg_cache = {}
 
     try:
         await redis_client.connect()
@@ -116,16 +140,8 @@ async def lifespan(_app: FastAPI):
 
     yield
 
-    if _dewarp_proc is not None:
-        print("[lifespan] stopping dewarp-svc ...")
-        try:
-            _dewarp_proc.terminate()
-            try:
-                _dewarp_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                _dewarp_proc.kill()
-        except Exception:
-            pass
+    _stop(_dewarp_proc, "dewarp-svc")
+    _stop(_esrgan_proc, "esrgan-svc")
 
     try:
         await redis_client.disconnect()
@@ -156,9 +172,6 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 GLOBAL_BROADCAST_THRESHOLD = 70
 
-# Set to 50 for testing the global broadcast, restore to 70 for production
-GLOBAL_BROADCAST_THRESHOLD = 70
-
 ocr = OCRService()
 validator = ValidationService()
 tampering = TamperingDetector()
@@ -167,7 +180,6 @@ scorer = RiskScorer()
 quality_gate = ImageQualityGate(ocr_probe=ocr.probe_confidence)
 enhancer = EnhancementService(enabled=True)
 
-# Lazy Fabric client (won't crash on import if network is down)
 _fabric_client = None
 
 def get_fabric():
@@ -179,18 +191,14 @@ def get_fabric():
 
 async def _read_upload(upload: UploadFile, label: str) -> bytes:
     if upload.content_type not in ALLOWED_MIME:
-        raise HTTPException(
-            status_code=415,
-            detail=f"{label}: unsupported content type {upload.content_type!r}",
-        )
+        raise HTTPException(status_code=415,
+            detail=f"{label}: unsupported content type {upload.content_type!r}")
     data = await upload.read()
     if not data:
         raise HTTPException(status_code=400, detail=f"{label}: empty file")
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"{label}: exceeds {MAX_UPLOAD_BYTES} bytes",
-        )
+        raise HTTPException(status_code=413,
+            detail=f"{label}: exceeds {MAX_UPLOAD_BYTES} bytes")
     return data
 
 
@@ -199,7 +207,6 @@ async def screen_traveler(
     document: UploadFile = File(...),
     live_photo: UploadFile = File(...),
 ):
-    # ---------- TIMING ----------
     _timings = {"start": _t.time()}
     def _mark(label):
         _timings[label] = _t.time()
@@ -211,9 +218,16 @@ async def screen_traveler(
     live_bytes = await _read_upload(live_photo, "live_photo")
     _mark("upload")
 
-    # ---- Layer 1 – Quality Gate -------------------------------------
-    quality = quality_gate.assess(doc_bytes)
-    _mark("quality_gate")
+    # ---- Layer 1 – Quality Gate (cached) ----------------------------
+    qg_key = hashlib.sha256(doc_bytes).hexdigest()
+    if qg_key in app.state.qg_cache:
+        quality = app.state.qg_cache[qg_key]
+        print("[timing] quality_gate: cache HIT")
+    else:
+        quality = quality_gate.assess(doc_bytes)
+        app.state.qg_cache[qg_key] = quality
+        _mark("quality_gate")
+
     if quality["decision"] == "reject":
         raise HTTPException(status_code=422, detail={
             "error": "image_quality_rejected",
@@ -225,6 +239,10 @@ async def screen_traveler(
     # ---- Layer 2 – Enhancement Retry --------------------------------
     was_enhanced = False
     if quality["decision"] == "enhance":
+        pre_hash = hashlib.sha256(doc_bytes).hexdigest()
+        enhancer_cache_hit = os.path.exists(
+            os.path.join(ENHANCER_CACHE_DIR, pre_hash + ".pkl"))
+
         try:
             doc_bytes, was_enhanced = await enhancer.enhance(doc_bytes, quality)
             _mark("enhance")
@@ -233,8 +251,16 @@ async def screen_traveler(
                 "error": "enhancement_failed",
                 "fix_instructions": quality["reasons"],
             })
-        quality = quality_gate.assess(doc_bytes)
-        _mark("quality_recheck")
+
+        new_hash = hashlib.sha256(doc_bytes).hexdigest()
+        if enhancer_cache_hit and new_hash in app.state.qg_cache:
+            quality = app.state.qg_cache[new_hash]
+            print("[timing] quality_recheck: cache HIT")
+        else:
+            quality = quality_gate.assess(doc_bytes)
+            app.state.qg_cache[new_hash] = quality
+            _mark("quality_recheck")
+
         if quality["decision"] == "reject":
             raise HTTPException(status_code=422, detail={
                 "error": "still_unreadable_after_enhancement",
@@ -265,19 +291,13 @@ async def screen_traveler(
     _mark("validation")
 
     # ---- 3. Tampering ------------------------------------------------
-    tampering_result = {
-        "tampering_score": 0.0,
-        "is_tampered": False,
-        "risk_factors": [],
-    }
+    tampering_result = {"tampering_score": 0.0, "is_tampered": False, "risk_factors": []}
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
         tmp_file.write(doc_bytes)
         temp_path = tmp_file.name
     try:
         tampering_result = tampering.analyze(
-            temp_path,
-            ocr_lines=ocr_data.get("ocr_lines", []),
-        )
+            temp_path, ocr_lines=ocr_data.get("ocr_lines", []))
     finally:
         try:
             os.unlink(temp_path)
@@ -290,8 +310,7 @@ async def screen_traveler(
     _mark("face_verify")
 
     # ---- 5. Risk scoring ---------------------------------------------
-    is_expired = any("expired" in e.lower()
-                     for e in validation.get("errors", []))
+    is_expired = any("expired" in e.lower() for e in validation.get("errors", []))
     risk = scorer.calculate(
         tampering_score=tampering_result.get("tampering_score", 0),
         face_distance=face_result.get("distance", 0),
@@ -305,11 +324,9 @@ async def screen_traveler(
 
     if ocr_failed and risk.get("decision") == "APPROVE":
         risk["decision"] = "SECONDARY_INSPECTION"
-        risk.setdefault("reasons", []).append(
-            "OCR unreadable — manual review required"
-        )
+        risk.setdefault("reasons", []).append("OCR unreadable — manual review required")
 
-    # ---- 6. Blockchain write (public + private PII) ------------------
+    # ---- 6. Blockchain -----------------------------------------------
     screening_id = uuid.uuid4().hex[:16]
     blockchain_ok = False
     blockchain_error = None
@@ -342,7 +359,6 @@ async def screen_traveler(
         )
         blockchain_ok = True
 
-        # Mirror high-risk screenings to global channel for cross-border alerting
         if float(risk.get("score", 0)) > GLOBAL_BROADCAST_THRESHOLD:
             try:
                 fabric.broadcast_alert({
@@ -362,7 +378,6 @@ async def screen_traveler(
         blockchain_error = str(e)
     _mark("blockchain")
 
-    # ---- 7. Response -------------------------------------------------
     if os.getenv("DEBUG_OCR", "false").lower() != "true":
         ocr_data = {k: v for k, v in ocr_data.items() if k != "ocr_lines"}
 

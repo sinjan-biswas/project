@@ -12,8 +12,25 @@ class OCRService:
         self.classifier = DocumentClassifier()
         # NOTE: pytesseract legacy fallback REMOVED. Do not re-add it.
 
+        # Warm up PaddleOCR + TrOCR so the first real request doesn't pay
+        # CUDA JIT compilation cost (~5s). Runs once at startup.
+        self._warmup()
+
+    def _warmup(self):
+        import numpy as np
+        import time as _t
+        t0 = _t.time()
+        try:
+            # A blank image is enough — this just triggers the CUDA kernel
+            # compilation path in PaddleOCR's det/rec/cls models.
+            dummy = np.full((224, 224, 3), 255, dtype=np.uint8)
+            self.engine.probe_confidence(dummy)
+            print(f"[ocr_service] PaddleOCR warm-up complete in {_t.time()-t0:.1f}s")
+        except Exception as e:
+            print(f"[ocr_service] PaddleOCR warm-up failed: {e}")
+
     # ------------------------------------------------------------------ #
-    #  NEW — quality-gate probe (Paddle-only, no deskew, no TrOCR)
+    #  Quality-gate probe (Paddle-only, no deskew, no TrOCR)
     # ------------------------------------------------------------------ #
     def probe_confidence(self, image_bytes: bytes) -> float:
         """

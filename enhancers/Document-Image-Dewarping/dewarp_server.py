@@ -18,6 +18,7 @@ PORT = 8765
 app = FastAPI()
 _model = None
 
+
 @app.on_event("startup")
 def _load():
     global _model
@@ -30,11 +31,26 @@ def _load():
     m.load_state_dict(state)
     m.to(DEVICE).eval()
     _model = m
-    print(f"[dewarp-svc] ready in {time.time()-t0:.1f}s")
+
+    # Warm-up — force CUDA JIT compile with a real-size dummy.
+    # Without this, the FIRST request eats ~15-20s of kernel compilation.
+    print(f"[dewarp-svc] warming up CUDA kernels ({INPUT_SIZE}x{INPUT_SIZE}) ...")
+    dummy = np.zeros((INPUT_SIZE, INPUT_SIZE, 3), dtype=np.float32)
+    dummy_t = (torch.from_numpy(dummy)
+               .permute(2, 0, 1)
+               .unsqueeze(0)
+               .to(DEVICE)
+               .float())
+    with torch.no_grad():
+        _ = m(dummy_t)
+
+    print(f"[dewarp-svc] ready in {time.time() - t0:.1f}s")
+
 
 @app.get("/health")
 def health():
     return {"ok": _model is not None, "device": DEVICE}
+
 
 @app.post("/dewarp")
 async def dewarp(file: UploadFile = File(...)):
@@ -68,6 +84,7 @@ async def dewarp(file: UploadFile = File(...)):
 
     ok, buf = cv2.imencode(".png", img_bgr)
     return Response(content=buf.tobytes(), media_type="image/png")
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")
