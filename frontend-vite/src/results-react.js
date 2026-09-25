@@ -1,4 +1,13 @@
-/* React result surface: risk hero + extracted fields + verification checks + CTA. */
+/* React result surface for the wizard finalize response.
+   Renders: risk hero · extracted fields · liveness · tampering · CTA · case id.
+   Merged data from app.js:
+     - data.risk_assessment         (finalize)
+     - data.tampering[]             (finalize)
+     - data.liveness.{anti_spoof,face_match,blink_*} (finalize)
+     - data.validation_summary       (finalize)
+     - data.ocr_data.fields          (stitched from Stage 2)
+     - data.validation               (stitched from Stage 2, first doc)
+*/
 (function () {
   const rootElement = document.getElementById("results");
   if (!rootElement || !window.React || !window.ReactDOM) return;
@@ -21,7 +30,9 @@
     const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
     return m ? `${m[3]}/${m[2]}/${m[1]}` : s;
   };
-  const titleCase = (s) => s ? String(s).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : s;
+  const titleCase = (s) => s
+    ? String(s).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    : s;
 
   const labelStyle = { color: "#6b7280", fontSize: "0.74rem", letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 600 };
   const valueStyle = { fontWeight: 600, color: "#0f172a", fontSize: "0.95rem", textAlign: "right" };
@@ -69,26 +80,37 @@
           style: { fontSize: "28px", marginBottom: "10px", display: "block" },
         }),
         h("p", { key: "p", style: { margin: 0, fontSize: "0.9rem" } },
-          data?.loading ? "Analyzing identity and document integrity…"
-            : data?.error || "Upload a document and capture a live photo to begin."),
+          data?.loading ? "Running final checks…"
+            : data?.error || "Complete Stages 1–3 to see the final decision."),
       ]);
     }
 
+    // ---- normalise both response shapes ----
     const risk = data.risk_assessment || data.risk || {};
-    const face = data.biometrics || data.face_verification || {};
-    const tamper = data.tampering || {};
-    const validation = data.validation || {};
-
     const score = num(risk.score ?? risk.risk_score);
-    const decision = (risk.decision || risk.recommendation || "PENDING").replaceAll("_", " ");
-    const matched = face.match === true || face.is_match === true || face.verified === true;
-    const isTampered = tamper.is_tampered === true || tamper.tampered === true;
-    const isValid = validation.valid === true || validation.is_valid === true;
+    const decision = String(risk.decision || risk.recommendation || "PENDING").replaceAll("_", " ");
 
-    const ex = data.ocr_data?.fields || data.ocr_data || data.ocr?.fields || data.ocr
-      || data.extracted_fields || data.extracted || data.fields
-      || data.document_fields || data.document || {};
+    // tampering: array (finalize) or object (legacy)
+    const tamperArr = Array.isArray(data.tampering) ? data.tampering : (data.tampering ? [data.tampering] : []);
+    const worstTamper = tamperArr.reduce((acc, t) => Math.max(acc, num(t.tampering_score)), 0);
+    const isTampered = worstTamper >= 65 || tamperArr.some((t) => t.is_tampered === true);
 
+    // liveness
+    const live = data.liveness || {};
+    const anti = live.anti_spoof || null;
+    const faceM = live.face_match || null;
+    const matched = !!faceM?.passed || data.face_verification?.verified === true
+      || data.biometrics?.verified === true;
+
+    // validation
+    const valSum = data.validation_summary || data.validation || {};
+    const isValid = (valSum.errors?.length || 0) === 0
+      && data.validation?.valid !== false;
+
+    // fields
+    const ex = data.ocr_data?.fields || data.ocr_data
+      || data.extracted_fields || data.extracted
+      || data.fields || {};
     const name = pick(ex, "name", "full_name", "holder_name", "holder");
     const dob = fmtDate(pick(ex, "dob", "date_of_birth", "birth_date"));
     const docNum = pick(ex, "document_number", "passport_number", "aadhaar_number",
@@ -97,16 +119,17 @@
     const expiry = fmtDate(pick(ex, "expiry", "date_of_expiry", "expiry_date", "valid_until"));
     const gender = pick(ex, "gender", "sex");
     const docType = pick(data, "document_type", "doc_type")
-      || pick(ex, "document_type", "doc_type", "type")
-      || pick(data.ocr_data || {}, "document_type");
+      || pick(data.ocr_data || {}, "document_type")
+      || pick(ex, "document_type", "doc_type", "type");
 
+    // CTA
     let cta = null, ctaTone = "info";
-    if (isTampered) { cta = "Tampering detected — flag for manual inspection, do not proceed."; ctaTone = "fail"; }
-    else if (!isValid) { cta = "Document validation failed — ask the traveller to reupload a clearer, uncropped image."; ctaTone = "fail"; }
-    else if (!matched) { cta = "Face does not match the document — request a new live photo or escalate."; ctaTone = "warn"; }
-    else if (/DENY|REJECT/i.test(decision)) { cta = "Document denied. Do not proceed."; ctaTone = "fail"; }
+    if (isTampered)        { cta = `Tampering signals elevated (${worstTamper.toFixed(1)}). Flag for manual inspection.`; ctaTone = "fail"; }
+    else if (!matched)     { cta = "Face did not match the document — request a new live photo or escalate."; ctaTone = "warn"; }
+    else if (!isValid)     { cta = "Document validation failed — re-upload a clearer image."; ctaTone = "fail"; }
+    else if (/DENY|REJECT/i.test(decision))       { cta = "Document denied. Do not proceed."; ctaTone = "fail"; }
     else if (/SECONDARY|REVIEW|MANUAL/i.test(decision)) { cta = "Manual review recommended before clearance."; ctaTone = "warn"; }
-    else if (/APPROVE|ALLOW/i.test(decision)) { cta = "All checks passed — proceed with clearance."; ctaTone = "pass"; }
+    else if (/APPROVE|ALLOW/i.test(decision))     { cta = "All checks passed — proceed with clearance."; ctaTone = "pass"; }
 
     const ctaColors = ctaTone === "pass"
       ? { bg: "#f0fdf4", border: "#bbf7d0", fg: "#166534", icon: "fas fa-circle-check" }
@@ -118,7 +141,7 @@
 
     return h("div", { style: { display: "flex", flexDirection: "column" } }, [
 
-      // ── 1. Risk score hero ─────────────────────────────
+      // ── 1. Risk hero ────────────────────────────────────
       h("div", {
         key: "hero",
         style: {
@@ -142,7 +165,7 @@
           }, decision)),
       ]),
 
-      // ── 2. Extracted document info ─────────────────────
+      // ── 2. Extracted document info ──────────────────────
       h("div", { key: "doc", style: cardStyle }, [
         h("div", { key: "h", style: headerStyle }, docType ? `Document · ${titleCase(docType)}` : "Document Details"),
         h(InfoRow, { key: "n", label: "Name", value: name }),
@@ -152,29 +175,51 @@
         h(InfoRow, { key: "nat", label: "Nationality", value: nationality }),
         h(InfoRow, { key: "exp", label: "Expiry", value: expiry }),
         (!name && !dob && !docNum) && h("p", {
-          key: "empty",
-          style: { color: "#94a3b8", fontSize: "0.85rem", margin: "8px 0 0" },
-        }, "No fields could be read from the document. Reupload a clearer image."),
+          key: "empty", style: { color: "#94a3b8", fontSize: "0.85rem", margin: "8px 0 0" },
+        }, "No fields could be read from the document."),
       ]),
 
-      // ── 3. Verification checks ─────────────────────────
-      h("div", { key: "checks", style: cardStyle }, [
-        h("div", { key: "h", style: headerStyle }, "Verification Checks"),
-        h("div", { key: "f", style: rowStyle }, [
-          h("span", { key: "l", style: labelStyle }, "Face Verified"),
-          h(Pill, { key: "v", text: matched ? "YES" : "NO", tone: matched ? "pass" : "fail" }),
+      // ── 3. Liveness + face match ────────────────────────
+      (live.blink_count != null || anti || faceM) && h("div", { key: "live", style: cardStyle }, [
+        h("div", { key: "h", style: headerStyle }, "Liveness Check"),
+        h("div", { key: "b", style: rowStyle }, [
+          h("span", { key: "l", style: labelStyle }, "Blink Challenge"),
+          h("span", { key: "v", style: labelStyle }, `${num(live.blink_count)} / ${num(live.blink_target)}`),
+          h(Pill, { key: "p", text: num(live.blink_count) >= num(live.blink_target) ? "PASS" : "FAIL",
+                    tone: num(live.blink_count) >= num(live.blink_target) ? "pass" : "fail" }),
         ]),
-        h("div", { key: "t", style: rowStyle }, [
-          h("span", { key: "l", style: labelStyle }, "Tampering Detected"),
-          h(Pill, { key: "v", text: isTampered ? "YES" : "NO", tone: isTampered ? "fail" : "pass" }),
+        anti && h("div", { key: "a", style: rowStyle }, [
+          h("span", { key: "l", style: labelStyle }, "Anti-Spoof"),
+          h("span", { key: "v", style: { ...valueStyle, fontSize: "0.8rem" } }, `score ${num(anti.score).toFixed(3)}`),
+          h(Pill, { key: "p", text: anti.passed ? "LIVE" : "SPOOF", tone: anti.passed ? "pass" : "fail" }),
         ]),
-        h("div", { key: "val", style: { ...rowStyle, borderBottom: "none" } }, [
-          h("span", { key: "l", style: labelStyle }, "Validation"),
-          h(Pill, { key: "v", text: isValid ? "VALID" : "INVALID", tone: isValid ? "pass" : "fail" }),
+        faceM && h("div", { key: "f", style: { ...rowStyle, borderBottom: "none" } }, [
+          h("span", { key: "l", style: labelStyle }, "Face Match"),
+          h("span", { key: "v", style: { ...valueStyle, fontSize: "0.8rem" } }, `distance ${num(faceM.distance).toFixed(3)}`),
+          h(Pill, { key: "p", text: faceM.passed ? "MATCH" : "MISMATCH", tone: faceM.passed ? "pass" : "fail" }),
         ]),
       ]),
 
-      // ── 4. Action / next step ──────────────────────────
+      // ── 4. Tampering ────────────────────────────────────
+      tamperArr.length > 0 && h("div", { key: "tamp", style: cardStyle }, [
+        h("div", { key: "h", style: headerStyle }, `Tampering · ${tamperArr.length} document${tamperArr.length === 1 ? "" : "s"}`),
+        tamperArr.map((t, i) => h("div", { key: i, style: rowStyle }, [
+          h("span", { key: "l", style: labelStyle }, `Doc ${t.index ?? i}`),
+          h("span", { key: "v", style: valueStyle }, num(t.tampering_score).toFixed(1)),
+          h(Pill, { key: "p", text: t.is_tampered ? "TAMPERED" : "CLEAN", tone: t.is_tampered ? "fail" : "pass" }),
+        ])),
+      ]),
+
+      // ── 5. Validation errors ────────────────────────────
+      valSum.errors && valSum.errors.length > 0 && h("div", { key: "err", style: cardStyle }, [
+        h("div", { key: "h", style: headerStyle }, "Validation"),
+        valSum.errors.map((e, i) => h("p", {
+          key: i,
+          style: { margin: "4px 0", fontSize: "0.82rem", color: "#991b1b" },
+        }, `• ${e}`)),
+      ]),
+
+      // ── 6. Next step ────────────────────────────────────
       cta && h("div", {
         key: "cta",
         style: {
@@ -188,11 +233,11 @@
         h("span", { key: "t" }, cta),
       ]),
 
-      // ── 5. Case ID ─────────────────────────────────────
-      data.screening_id && h("p", {
+      // ── 7. Case id ──────────────────────────────────────
+      data.blockchain?.screening_id && h("p", {
         key: "id",
         style: { marginTop: "10px", fontSize: "0.72rem", color: "#94a3b8", textAlign: "center", fontFamily: "monospace" },
-      }, `Case ${data.screening_id}`),
+      }, `Case ${data.blockchain.screening_id} · ${data.blockchain.recorded ? "on-chain" : "not recorded"}`),
     ]);
   }
 

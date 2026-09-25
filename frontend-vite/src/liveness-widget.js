@@ -79,6 +79,7 @@
       window.dispatchEvent(new CustomEvent("liveness-verified", {
         detail: {
           verificationId: null,
+          livenessSessionId: sessionIdRef.current,   // ← ADD
           unverified,
           reason,
           livePhoto: bestFrameRef.current,
@@ -306,6 +307,7 @@
         window.dispatchEvent(new CustomEvent("liveness-verified", {
           detail: {
             verificationId: data.verification_id,
+            livenessSessionId: sid,                   // ← ADD
             unverified: false,
             livePhoto: bestFrameRef.current,
           },

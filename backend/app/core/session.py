@@ -1,13 +1,22 @@
 # app/core/session.py
-import json
-from datetime import datetime, timedelta
+"""
+Liveness-flow session storage.
+
+Distinct from app/core/session_store.py (screening sessions).
+Redis key prefix is "liveness:session:" here vs "screening:session:" there,
+so the two stores never collide in Redis even though the class name is similar.
+"""
+from datetime import datetime
 from redis.asyncio import Redis
 from app.models.session import Session
 from app.config import settings
 
 SESSION_KEY_PREFIX = "liveness:session:"
 
-class SessionStore:
+
+class LivenessSessionStore:
+    """Renamed from SessionStore → avoids clash with ScreeningSessionStore."""
+
     def __init__(self, redis: Redis):
         self.redis = redis
 
@@ -31,9 +40,13 @@ class SessionStore:
         session.updated_at = datetime.utcnow()
         await self.redis.setex(
             self._key(session.session_id),
-            settings.SESSION_TTL_SECONDS,  # sliding TTL
+            settings.SESSION_TTL_SECONDS,
             session.model_dump_json(),
         )
 
     async def delete(self, session_id: str) -> None:
         await self.redis.delete(self._key(session_id))
+
+
+# Backward-compat alias in case existing code imports SessionStore
+SessionStore = LivenessSessionStore

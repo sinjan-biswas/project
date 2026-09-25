@@ -2103,3 +2103,209 @@ button {
   align-self: start;
   height: auto;
 }
+/* ═══════════════════════════════════════════════════════════════
+   Wizard — Stage orchestration, Stage 1 preview grid, Stage 1
+   result rows, Stage 2 detail rows, quality pills.
+   Prefixed .wizard-stage / .spg- / .stage1- / .wz-pill so they
+   never collide with existing site classes.
+   ═══════════════════════════════════════════════════════════════ */
+
+.wizard-stage[hidden] { display: none !important; }
+.wizard-stage { animation: stageFadeIn 0.25s ease-out; }
+
+@keyframes stageFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* ---- Stage 1: uploaded-file preview grid ---- */
+.stage-preview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.spg-card {
+    position: relative;
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.spg-card img {
+    width: 100%;
+    height: 90px;
+    object-fit: cover;
+    display: block;
+}
+
+.spg-remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    border: none;
+    font-size: 0.9rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.spg-remove:hover { background: #d32f2f; }
+
+.spg-meta {
+    padding: 6px 8px;
+    font-size: 0.72rem;
+}
+
+.spg-name {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #e7eaf0;
+}
+
+.spg-size { color: #64748b; }
+
+/* ---- Stage 1: result summary bar ---- */
+.stage1-summary {
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stage1-summary.is-ok {
+    background: rgba(46, 125, 50, 0.15);
+    color: #7fe3a0;
+    border: 1px solid rgba(46, 125, 50, 0.35);
+}
+
+.stage1-summary.is-blocked {
+    background: rgba(230, 150, 20, 0.15);
+    color: #ffc978;
+    border: 1px solid rgba(230, 150, 20, 0.35);
+}
+
+/* ---- Stage 1: per-file rows ---- */
+.stage1-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.stage1-row {
+    padding: 10px 12px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+}
+
+.stage1-row.is-blocked {
+    border-color: rgba(211, 47, 47, 0.4);
+    background: rgba(211, 47, 47, 0.08);
+}
+
+.stage1-row-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: #e7eaf0;
+}
+
+.stage1-row-meta {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    font-size: 0.78rem;
+    color: #94a3b8;
+    flex-wrap: wrap;
+}
+
+.stage1-conf {
+    margin-left: auto;
+    font-weight: 600;
+    color: #e7eaf0;
+}
+
+.stage1-tag {
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(0, 229, 255, 0.15);
+    color: #00e5ff;
+    font-size: 0.68rem;
+    font-weight: 600;
+}
+
+.stage1-reason {
+    margin-top: 6px;
+    font-size: 0.75rem;
+    color: #ff9a9a;
+}
+
+/* ---- Quality / decision pills ---- */
+.wz-pill {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.wz-pill-accept  { background: rgba(46, 125, 50, 0.3);    color: #7fe3a0; }
+.wz-pill-enhance { background: rgba(230, 150, 20, 0.3);   color: #ffc978; }
+.wz-pill-reject  { background: rgba(211, 47, 47, 0.3);    color: #ff9a9a; }
+.wz-pill-unknown { background: rgba(148, 163, 184, 0.2);  color: #94a3b8; }
+
+/* ---- Shared stage helpers ---- */
+.stage-error {
+    color: #ff9a9a;
+    font-size: 0.85rem;
+}
+
+.stage-result-root {
+    min-height: 100px;
+}
+
+/* Inline spinner used by Validate button while submitting */
+.spinner-inline {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 6px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+}
+
+/* Step buttons row on Stage 2 */
+.screening-action {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+}
+
+/* Light border helper for the back/outline button in dark theme */
+.btn-outline-light {
+    background: transparent;
+    color: #e7eaf0;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.btn-outline-light:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.5);
+    background: rgba(255, 255, 255, 0.05);
+}

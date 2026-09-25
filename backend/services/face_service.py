@@ -19,78 +19,87 @@ class FaceVerificationService:
         return cls._instance
 
     def __init__(self):
-        # Skip re-initialization if already done
         if self._initialized:
             return
 
-        # --- 1. Set persistent cache directory ---
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         cache_dir = os.path.join(base_dir, "models", "insightface")
         os.environ['INSIGHTFACE_HOME'] = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
 
-        # --- 2. Model configuration ---
         self.model_name = "buffalo_l"
         self.threshold = 0.55
         self.det_size = (640, 640)
 
-        # --- 3. Auto-detect GPU (CUDA) ---
         try:
             import onnxruntime as ort
             available_providers = ort.get_available_providers()
             ctx_id = 0 if 'CUDAExecutionProvider' in available_providers else -1
         except ImportError:
-            ctx_id = -1   # fallback to CPU
+            ctx_id = -1
 
-        # --- 4. Load the model (this happens only ONCE) ---
         self.app = FaceAnalysis(name=self.model_name)
         self.app.prepare(ctx_id=ctx_id, det_size=self.det_size)
 
         print(f"✅ InsightFace Singleton initialized with model: {self.model_name} (ctx_id={ctx_id})")
         print(f"   Cache directory: {cache_dir}")
 
-        # Mark as initialized so subsequent calls skip the heavy load
         self._initialized = True
 
+    # ------------------------------------------------------------------
+    # NEW — used by FileRoleClassifier to decide document vs face
+    # ------------------------------------------------------------------
+    def detect(self, img_or_bytes):
+        """
+        Face detection only. Accepts bytes or a numpy BGR array.
+        Returns list of InsightFace Face objects (.bbox, .det_score, .normed_embedding).
+        Returns [] on failure / no face.
+        """
+        if isinstance(img_or_bytes, (bytes, bytearray)):
+            nparr = np.frombuffer(img_or_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        else:
+            img = img_or_bytes
+
+        if img is None or getattr(img, "size", 0) == 0:
+            return []
+
+        try:
+            return self.app.get(img) or []
+        except Exception as e:
+            print(f"[face_service.detect] error: {e}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Unchanged
+    # ------------------------------------------------------------------
     def _get_embedding(self, image_bytes: bytes):
-        """Extract 512-D face embedding from image bytes."""
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
         if img is None:
             return None
-
         faces = self.app.get(img)
         if not faces:
             return None
-
         return faces[0].normed_embedding
 
     def verify(self, document_image_bytes: bytes, live_photo_bytes: bytes):
-        """Compare document face with live photo face."""
         doc_emb = self._get_embedding(document_image_bytes)
         live_emb = self._get_embedding(live_photo_bytes)
 
         if doc_emb is None:
             return {
-                "verified": False,
-                "distance": 1.0,
-                "similarity": 0.0,
-                "threshold": self.threshold,
-                "confidence": 0.0,
+                "verified": False, "distance": 1.0, "similarity": 0.0,
+                "threshold": self.threshold, "confidence": 0.0,
                 "model": self.model_name,
-                "note": "No face detected in document image"
+                "note": "No face detected in document image",
             }
-
         if live_emb is None:
             return {
-                "verified": False,
-                "distance": 1.0,
-                "similarity": 0.0,
-                "threshold": self.threshold,
-                "confidence": 0.0,
+                "verified": False, "distance": 1.0, "similarity": 0.0,
+                "threshold": self.threshold, "confidence": 0.0,
                 "model": self.model_name,
-                "note": "No face detected in live photo"
+                "note": "No face detected in live photo",
             }
 
         similarity = float(np.dot(doc_emb, live_emb))
@@ -104,5 +113,5 @@ class FaceVerificationService:
             "threshold": self.threshold,
             "confidence": round(similarity, 4),
             "model": self.model_name,
-            "note": "Face verification completed" if verified else "Face mismatch detected"
+            "note": "Face verification completed" if verified else "Face mismatch detected",
         }

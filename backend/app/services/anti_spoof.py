@@ -57,14 +57,15 @@ class AntiSpoofModel:
                 return self._heuristic(face_crop)
 
             img = cv2.resize(face_crop, self.INPUT_HW)
-            img = img.astype(np.float32) / 255.0          # BGR, x/255
-            img = np.transpose(img, (2, 0, 1))[None, ...] # HWC -> 1CHW
+            img = img.astype(np.float32) / 255.0                # [0, 1]
+            img = (img - 0.5) / 0.5                             # [0, 1] -> [-1, 1]
+            img = np.transpose(img, (2, 0, 1))[None, ...]       # HWC -> 1CHW
 
             logits = self.session.run(None, {self.input_name: img})[0][0]
             probs = self._softmax(logits)
 
             # Class 0 = live, 1 = print, 2 = replay
-            live_score = float(probs[0])
+            live_score = float(probs[2])
             passed = live_score > 0.5
             return {
                 "passed": passed,
