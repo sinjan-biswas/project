@@ -23,6 +23,7 @@ from app.core.redis import redis_client
 from app.routers import liveness
 from services.pipeline import DocumentPipeline
 from app.routers.documents import router as documents_router
+from app.routers.screening_history import router as history_router
 
 
 
@@ -190,6 +191,7 @@ app.add_middleware(
 app.include_router(liveness.router)
 app.include_router(documents_router) 
 app.include_router(screening_router)
+app.include_router(history_router)
 
 
 # ---------------------------------------------------------------------------

@@ -270,9 +270,15 @@ Expected: JSON array with 6 sample assets.
 **Start (after reboot):**
 
 ```bash
+# After reboot
+sudo systemctl start containerd docker
+docker start orderer.example.com peer0.org1.example.com peer0.org2.example.com couchdb0 couchdb1 cli
+```
+
+```bash
 sudo systemctl start containerd docker
 cd ~/Documents/project/fabric-samples/test-network
-./network.sh up createChannel -c screening-channel -ca
+docker start orderer.example.com peer0.org1.example.com peer0.org2.example.com couchdb0 couchdb1 cli
 ```
 
 **Stop:**

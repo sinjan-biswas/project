@@ -135,7 +135,22 @@ async def finalize(
     if screening.stage != "ocr_done":
         raise HTTPException(409, f"screening stage must be 'ocr_done' (got '{screening.stage}')")
 
-    liveness = await LivenessSessionStore(redis).get(live_sid)
+    liveness = None
+    last_err = None
+    for attempt in range(3):
+        try:
+            liveness = await LivenessSessionStore(redis).get(live_sid)
+            break
+        except Exception as e:
+            last_err = e
+            print(f"[finalize] liveness read attempt {attempt + 1}/3 failed: {e}")
+            await asyncio.sleep(0.25 * (attempt + 1))  # 250ms, 500ms, 750ms
+
+    if liveness is None and last_err is not None:
+        raise HTTPException(
+            503,
+            f"liveness session read timed out after 3 attempts: {last_err}",
+        )
     if not liveness:
         raise HTTPException(404, "liveness session not found or expired")
 

@@ -132,8 +132,8 @@ async def process_frame(
         session.blink_count += 1
         print(f"[blink] DETECTED — total={session.blink_count}/{session.blink_target}")
 
-    if len(session.captured_frames) < 20:
-        _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if len(session.captured_frames) < 6:
+        _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
         session.captured_frames.append(base64.b64encode(buf).decode("utf-8"))
 
     if session.state in ("created", "face_aligned"):

@@ -12,8 +12,12 @@ class RedisClient:
     async def connect(self):
         self.pool = ConnectionPool.from_url(
             settings.REDIS_URL,
-            max_connections=50,
+            max_connections=100,
             decode_responses=True,
+            socket_timeout=30,            # ← was too low / default
+            socket_connect_timeout=10,
+            retry_on_timeout=True,
+            health_check_interval=30,
         )
         self.client = Redis(connection_pool=self.pool)
 
@@ -26,7 +30,7 @@ class RedisClient:
     def get_client(self) -> Redis:
         return self.client
 
-    # ---- thin async wrappers (used by session_store) ----
+    # thin async wrappers (used by session_store)
     async def get(self, key: str):
         if self.client is None:
             return None
