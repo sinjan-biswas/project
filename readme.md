@@ -1,681 +1,506 @@
+```markdown
 # AI-Based Fake Identity & Document Screening System
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)
+![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.12+-green.svg)
 ![Node.js](https://img.shields.io/badge/node.js-18+-green.svg)
 ![Blockchain](https://img.shields.io/badge/blockchain-Hyperledger%20Fabric-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-**Production-grade AI system for automated document verification, tampering detection, and traveler screening at border checkpoints.**
+**3-stage guided wizard for document verification, tampering detection, and traveler screening.**
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Architecture](#-architecture) • [API](#-api-usage) • [Docs](#-documentation)
+[Quick Start](#-quick-start) • [3-Stage Flow](#-the-3-stage-flow) • [Architecture](#-architecture) • [API](#-api-reference) • [Blockchain](#-blockchain-setup)
 
 </div>
 
 ---
 
-## 📋 Overview
+## Overview
 
-The **AI Border Screening System** combines computer vision, facial recognition, deep learning, and blockchain to automate identity document verification at border checkpoints. The system:
+The system verifies identity documents (passports, visas, Aadhaar, PAN, driving licences, voter IDs, permits) through a **3-stage guided flow** with a hard liveness gate, then records every decision on a **Hyperledger Fabric** ledger.
 
-✅ **Analyzes identity documents** (passports, visas, national IDs) via OCR  
-✅ **Detects tampering** using 5-signal ML fusion (CNN, face swap, text manipulation, stamps, metadata)  
-✅ **Verifies facial identity** with InsightFace embeddings (0.92+ accuracy)  
-✅ **Scores risk** using explainable weighted signals  
-✅ **Records immutably** on Hyperledger Fabric blockchain  
-✅ **Alerts globally** on high-risk cases across borders  
-✅ **Protects PII** with private data collections (GDPR-compliant)  
-
-**Reduces verification time from 5-10 minutes to 5-7 seconds** while improving accuracy and creating an auditable trail.
+- **5–7 s per screening** (GPU), **15–20 s** without GPU
+- **7 document types** classified automatically
+- **5-signal tampering fusion** (CNN + photo swap + text + stamps + EXIF)
+- **Blink + anti-spoof + face-match** liveness pipeline
+- **CouchDB-backed** rich query for the audit history view
+- **Private data collection** for GDPR-compliant PII storage
 
 ---
 
-## 🚀 Key Features
+## The 3-Stage Flow
 
-| Feature | Description |
-|---------|------------|
-| **🗂️ Document Classification** | 7 document types (passport, visa, Aadhaar, PAN, voter ID, driving license, permit) |
-| **👁️ OCR + Field Extraction** | PaddleOCR + TrOCR dual-engine with MRZ zone extraction |
-| **✅ Validation Engine** | MRZ checksums, expiry dates, field consistency, blacklist checks |
-| **🔍 Tampering Detection** | 5-signal fusion: CNN (45%), photo swap (20%), text (15%), stamps (10%), EXIF (10%) |
-| **👤 Face Verification** | InsightFace buffalo_l embeddings (512-D, 0.55 threshold) |
-| **⚠️ Quality Gate** | Image blur/tilt/illumination assessment + enhancement retry |
-| **📊 Risk Scoring** | Weighted fusion with hard overrides (0–100 scale, explainable reasons) |
-| **⛓️ Blockchain Audit** | Hyperledger Fabric v2.5 with CouchDB, immutable screening records |
-| **🌍 Cross-Border Alerts** | Real-time global fraud detection (identity reuse, impossible travel) |
-| **🔐 Private Data** | GDPR-compliant PII storage in Fabric private collections |
-| **🎨 React UI** | Vite + TypeScript, real-time screening results, document preview |
+```
+┌──────────────────────────┐
+│ STAGE 1 · Upload         │  POST /api/v2/documents/validate
+│ Quality + Enhance +      │  → per-file: quality, doc_type, confidence
+│ Classify                 │  → returns screening_session_id
+└────────────┬─────────────┘
+             ▼
+┌──────────────────────────┐
+│ STAGE 2 · Read           │  POST /api/v2/documents/details
+│ OCR + MRZ + Validation   │  → per-doc: fields, MRZ, validation errors
+└────────────┬─────────────┘
+             ▼
+┌──────────────────────────┐
+│ STAGE 3 · Liveness       │  POST /api/v2/screening/start-liveness
+│ Blink → PAD → Face match │  POST /liveness/session/{id}/frame (×N)
+│                          │  POST /liveness/session/{id}/complete-blink-challenge
+│                          │  POST /liveness/session/{id}/anti-spoof
+│                          │  POST /liveness/session/{id}/face-match
+│                          │  POST /liveness/session/{id}/verify
+└────────────┬─────────────┘
+             ▼
+┌──────────────────────────┐
+│ FINALIZE (automatic)     │  POST /api/v2/screening/finalize
+│ Tampering + Risk +       │  → risk_score, decision, tampering[],
+│ Blockchain               │    liveness{}, blockchain{}
+└──────────────────────────┘
+```
+
+Each stage is a discrete user checkpoint. The frontend is a wizard that shows one stage at a time; the backend keeps the session alive in Redis with a 30-minute sliding TTL.
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Frontend (React + Vite)                            │
-│  - Document upload                                  │
-│  - Camera capture                                   │
-│  - Screening results display                        │
-└────────────────┬────────────────────────────────────┘
-                 │ HTTP/REST
-┌────────────────▼────────────────────────────────────┐
-│  Backend API (FastAPI + Uvicorn)                    │
-│  ┌──────────────────────────────────────────────┐   │
-│  │ 7-Layer Screening Pipeline                  │   │
-│  │ ├─ Layer 1: Quality Gate (CV)              │   │
-│  │ ├─ Layer 2: Enhancement (ESRGAN + DCE)    │   │
-│  │ ├─ Layer 3: OCR + Classification          │   │
-│  │ ├─ Layer 4: Validation                    │   │
-│  │ ├─ Layer 5: Tampering Detection (5-signal)│   │
-│  │ ├─ Layer 6: Face Verification             │   │
-│  │ ├─ Layer 7: Risk Scoring                  │   │
-│  │ └─ Layer 8: Blockchain Recording          │   │
-│  └──────────────────────────────────────────────┘   │
-│                                                      │
-│  ┌──────────────────────────────────────────────┐   │
-│  │ ML Models (Singleton Pattern)               │   │
-│  │ • PaddleOCR + TrOCR (OCR engines)          │   │
-│  │ • EfficientNet-B0 (doc classifier)         │   │
-│  │ • InsightFace buffalo_l (face embeddings)  │   │
-│  │ • TamperNet ResNet18 (tampering CNN)       │   │
-│  │ • Heuristic detectors (stamps, text)       │   │
-│  └──────────────────────────────────────────────┘   │
-└────────────────┬────────────────────────────────────┘
-                 │ gRPC
-┌────────────────▼────────────────────────────────────┐
-│  Hyperledger Fabric Network (Blockchain)            │
-│  ┌──────────────────────────────────────────────┐   │
-│  │ screening-channel (regional)                │   │
-│  │ └─ Screening records + fraud alerts         │   │
-│  ├──────────────────────────────────────────────┤   │
-│  │ screening-channel-eu (regional)             │   │
-│  │ screening-channel-apac (regional)           │   │
-│  ├──────────────────────────────────────────────┤   │
-│  │ screening-channel-global (cross-border)     │   │
-│  │ └─ High-risk cases (risk > 70)             │   │
-│  └──────────────────────────────────────────────┘   │
-│  CouchDB (state database + indices)                 │
-└────────────────────────────────────────────────────┘
-```
-
----
-
-## 📊 Request Lifecycle
-
-```
-Input: document.jpg + live_photo.jpg
-  ↓
-LAYER 1: Quality Gate (50-200ms)
-  • Blur detection (Laplacian variance)
-  • Skew detection (edge angles)
-  • Illumination check (dark%, glare%)
-  • Decision: REJECT | ENHANCE | OK
-  ↓
-LAYER 2: Enhancement (2-5s if needed)
-  • Dewarp (perspective correction)
-  • Zero-DCE (low-light enhancement)
-  • Real-ESRGAN (2x upscaling)
-  ↓
-LAYER 3: OCR + Classification (1.5-2.5s)
-  • Document type classification (EfficientNet-B0)
-  • Text extraction (PaddleOCR + TrOCR fallback)
-  • Field parsing (MRZ, DOB, expiry, etc.)
-  ↓
-LAYER 4: Validation (10-50ms)
-  • MRZ checksum verification
-  • Field completeness
-  • Expiry date check
-  ↓
-LAYER 5: Tampering Detection (1.5-4s)
-  • Signal 1: CNN (TamperNet ResNet18) — 45%
-  • Signal 2: Photo Substitution — 20%
-  • Signal 3: Text Manipulation — 15%
-  • Signal 4: Stamp Forgery — 10%
-  • Signal 5: EXIF Metadata — 10%
-  ↓
-LAYER 6: Face Verification (800-1500ms)
-  • Extract embedding from document
-  • Extract embedding from live photo
-  • Compute similarity (0.55 threshold)
-  ↓
-LAYER 7: Risk Scoring (<10ms)
-  • Weighted fusion (tampering 35%, face 30%, validation 20%, expiry 15%)
-  • Hard overrides (OCR failure, enhancement)
-  ↓
-LAYER 8: Blockchain Recording (500-2000ms)
-  • Hash document + passport
-  • Record on screening-channel
-  • Store PII in private collection
-  • If risk > 70: broadcast to screening-channel-global
-  ↓
-Output: Screening decision (APPROVE | SECONDARY_INSPECTION | DENY)
-
-TOTAL: 5-7 seconds (GPU), 15-20 seconds (with enhancement + TrOCR)
+┌────────────────────────────────────────────────────────┐
+│  Frontend — React 19 + Vite 6 + Tailwind 3             │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ Marketing sections (Hero, Pipeline, Signals)    │  │
+│  │ Wizard (Step1Upload → Step2Liveness → Step3Res) │  │
+│  │ ScreeningHistory (live from Fabric ledger)      │  │
+│  └──────────────────────────────────────────────────┘  │
+└─────────────────────────┬──────────────────────────────┘
+                          │ /api/* + /liveness/* (Vite proxy)
+┌─────────────────────────▼──────────────────────────────┐
+│  Backend — FastAPI + Uvicorn                           │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ Router layer                                     │  │
+│  │  documents.py     → stage 1 + 2                  │  │
+│  │  liveness.py      → blink / PAD / face match     │  │
+│  │  screening_finalize.py → start-liveness + finalize│ │
+│  │  screening_history.py  → ledger read-throughs    │  │
+│  │  (legacy /api/v2/screen still mounted, deprecated)│ │
+│  ├──────────────────────────────────────────────────┤  │
+│  │ DocumentPipeline.run_document()                  │  │
+│  │  Quality → Enhance → OCR → Validation →          │  │
+│  │  Tampering → Face → Risk → Blockchain            │  │
+│  ├──────────────────────────────────────────────────┤  │
+│  │ Models (lazy singletons)                         │  │
+│  │  PaddleOCR + TrOCR · EfficientNet-B0             │  │
+│  │  InsightFace buffalo_l · TamperNet ResNet18      │  │
+│  │  MiniFASNetV2 (PAD)                              │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                         │
+│  SessionStore — Redis (metadata) + disk (raw bytes)    │
+│  Enhancer services — warm subprocesses on :8765/:8766  │
+└─────────────────────────┬──────────────────────────────┘
+                          │ `peer chaincode invoke` (subprocess)
+┌─────────────────────────▼──────────────────────────────┐
+│  Hyperledger Fabric 2.5 (Docker)                       │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ Channel: screening-channel                       │  │
+│  │ Chaincode: screening v1.0                        │  │
+│  │   RecordScreening · GetScreening ·               │  │
+│  │   GetScreeningPII · QueryScreeningsByCheckpoint  │  │
+│  │                                                  │  │
+│  │ Private data collection:                         │  │
+│  │   screeningPrivateDetails (blockToLive: 90)      │  │
+│  │                                                  │  │
+│  │ State DB: CouchDB (required for rich queries)    │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## ⚡ Quick Start
+## Stack
 
-### Prerequisites
+| Layer | Tech | Notes |
+|---|---|---|
+| Frontend | React 19, Vite 6, Tailwind 3, lucide-react | Pure SPA |
+| Backend | FastAPI, Uvicorn, Python 3.12 | Session-backed staging |
+| ML / CV | PyTorch, PaddleOCR, TrOCR, InsightFace, ONNX Runtime | GPU-optional |
+| Sessions | Redis (metadata) + local disk (bytes) | 30-min sliding TTL |
+| Blockchain | Hyperledger Fabric 2.5, Go chaincode | CouchDB state store |
+| Infra | Docker 24.0.9, docker-compose 2.24.5 | Fabric containers only |
 
-- **Ubuntu** 22.04+ (tested 26.04)
-- **Python** 3.11+ or 3.12+
-- **Node.js** 18+ and npm
-- **Docker** 24.0.9 (exact version required for Fabric compatibility)
-- **Go** 1.20.14 (for chaincode)
-- **8+ GB RAM** (minimum)
+---
 
-### 1️⃣ Clone Repository
+## Quick Start
+
+### 1. Start Fabric
 
 ```bash
-git clone https://github.com/yourusername/ai-border-screening.git
-cd ai-border-screening
+cd ~/Documents/project/fabric-samples/test-network
+export PATH="$HOME/Documents/project/fabric-samples/bin:$PATH"
+export FABRIC_CFG_PATH="$HOME/Documents/project/fabric-samples/config"
+
+# First time only — full bring-up
+./network.sh down
+./network.sh up createChannel -c screening-channel -s couchdb
+./network.sh deployCC \
+  -c screening-channel -ccn screening \
+  -ccp ~/Documents/project/fabric-samples/screening-chaincode-go \
+  -ccl go -ccv 1.0 -ccs 1 \
+  -cccg ~/Documents/project/fabric-samples/screening-chaincode-go/collections_config.json
 ```
 
-### 2️⃣ Backend Setup (5 minutes)
+**Every subsequent boot** (containers exist, just stopped):
 
 ```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+docker start orderer.example.com peer0.org1.example.com peer0.org2.example.com \
+             couchdb0 couchdb1 cli
 ```
 
-Or with `uv` (faster):
+### 2. Start Redis (if not running as a service)
+
 ```bash
-uv venv
-source .venv/bin/activate
-uv pip install -r requirements.txt
+redis-cli ping || sudo systemctl start redis-server
 ```
 
-### 3️⃣ Frontend Setup (2 minutes)
+### 3. Start Backend
+
+Must be launched from a shell with `peer` on `PATH`.
 
 ```bash
-cd frontend-vite
-npm install
+which peer   # should print a path
+
+cd ~/Documents/project/backend
+uv run uvicorn main:app --port 8000 --reload
 ```
 
-### 4️⃣ Start Services
+Wait for `Application startup complete.`
 
-**Terminal 1 — Backend:**
-```bash
-cd backend
-uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
+### 4. Start Frontend
 
-**Terminal 2 — Frontend:**
 ```bash
-cd frontend-vite
+cd ~/Documents/project/frontend-vite
+npm install          # first time only
 npm run dev
 ```
 
-**Open** http://localhost:5173 in your browser.
+Open `http://localhost:5173`.
 
 ---
 
-## 🔗 Blockchain Setup (Optional)
+## API Reference
 
-For full blockchain integration with Hyperledger Fabric, see [**BLOCKCHAIN_SETUP.md**](BLOCKCHAIN_SETUP.md).
+### Stage 1 — Upload & Validate
 
-**⚠️ Critical version requirements:**
-- **Docker 24.0.9** (not 25+)
-- **fabric-samples v2.4.9** (not main)
-- **Go 1.20.14** (not 1.21+)
+```http
+POST /api/v2/documents/validate
+Content-Type: multipart/form-data
 
----
-
-## 📡 API Usage
-
-### Health Check
-
-```bash
-curl http://localhost:8000/health
+files: <binary>[]   # 1–10 images, JPEG/PNG/WebP, ≤15 MB each
 ```
 
 **Response:**
 ```json
 {
-  "status": "operational",
-  "version": "2.2.0"
+  "session_id": "sess_a1b2c3d4e5f6",
+  "expires_at": 1790394084.97,
+  "blocked": false,
+  "files": [
+    {
+      "index": 0,
+      "filename": "passport.jpg",
+      "quality": { "decision": "enhance", "score": 72.5, "reasons": ["tilted 12°"] },
+      "classification": { "doc_type": "passport", "confidence": 0.968 },
+      "enhanced": true,
+      "preview_url": "/api/v2/documents/preview/sess_.../0",
+      "blocked": false
+    }
+  ]
 }
 ```
 
-### Document Screening
+### Stage 2 — OCR + Validation
 
-```bash
-curl -X POST http://localhost:8000/api/v2/screen \
-  -F "document=@passport.jpg" \
-  -F "live_photo=@selfie.jpg" | jq
+```http
+POST /api/v2/documents/details
+Content-Type: application/json
+
+{ "session_id": "sess_a1b2c3d4e5f6" }
 ```
 
 **Response:**
 ```json
 {
-  "screening_id": "abc123def456",
-  "document_type": "passport",
-  "ocr_data": {
-    "success": true,
-    "fields": {
-      "name": "JOHN DOE",
-      "passport_number": "A12345678",
-      "date_of_birth": "1990-01-01",
-      "date_of_expiry": "2030-12-31",
-      "nationality": "US"
-    },
-    "classification_confidence": 0.95,
-    "image_quality": 87.5
-  },
-  "validation": {
-    "valid": true,
-    "errors": [],
-    "expiry_date": "2030-12-31"
-  },
-  "tampering": {
-    "tampering_score": 12.5,
-    "is_tampered": false,
-    "dl_score": 8.2,
-    "copy_move_score": 5.1,
-    "heatmap_path": "/static/heatmaps/abc123.jpg",
-    "risk_factors": []
-  },
-  "biometrics": {
-    "verified": true,
-    "similarity": 0.92,
-    "distance": 0.08,
-    "confidence": 0.92,
-    "model": "buffalo_l"
-  },
-  "risk_assessment": {
-    "score": 22.5,
-    "decision": "APPROVE",
-    "reasons": ["No tampering detected", "Face match confirmed"]
-  },
-  "blockchain": {
-    "recorded": true,
-    "screening_id": "abc123def456",
-    "pii_stored_privately": true,
-    "global_broadcast": false
-  },
-  "timestamp": "2026-09-23T14:30:45.123456"
+  "session_id": "sess_...",
+  "documents": [
+    {
+      "index": 0,
+      "doc_type": "passport",
+      "fields": { "name": "...", "passport_number": "...", "date_of_birth": "..." },
+      "mrz": { "raw": ["P<IND..."] },
+      "validation": { "valid": true, "errors": [], "warnings": [] },
+      "ocr_failed": false
+    }
+  ]
 }
 ```
 
-### Error Response (Quality Rejected)
+### Stage 3 — Start Liveness
 
-```bash
-HTTP 422 Unprocessable Entity
+```http
+POST /api/v2/screening/start-liveness
+Content-Type: application/json
+
+{ "session_id": "sess_...", "doc_index": 0 }
+```
+
+**Response:** `{ "liveness_session_id": "...", "blink_target": 2 }`
+
+### Liveness loop (existing endpoints)
+
+```http
+POST /liveness/session/{id}/frame                       # push a webcam frame
+POST /liveness/session/{id}/complete-blink-challenge
+POST /liveness/session/{id}/anti-spoof
+POST /liveness/session/{id}/face-match
+POST /liveness/session/{id}/verify                      # returns JWT on success
+GET  /liveness/session/{id}/status                      # poll checklist
+```
+
+### Finalize
+
+```http
+POST /api/v2/screening/finalize
+Content-Type: application/json
+
+{ "screening_session_id": "sess_...", "liveness_session_id": "..." }
+```
+
+**Response:**
+```json
 {
-  "error": "image_quality_rejected",
-  "quality_score": 28.5,
-  "fix_instructions": ["too dark", "tilted 15°"],
-  "metrics": {
-    "blur_var": 85.2,
-    "skew_deg": 15.0,
-    "dark_pct": 52.3,
-    "width": 1920,
-    "height": 1080,
-    "ocr_conf": 42.5
-  }
+  "screening_session_id": "sess_...",
+  "liveness_session_id": "...",
+  "stopped_early": false,
+  "liveness": {
+    "blink_count": 2, "blink_target": 2,
+    "anti_spoof": { "passed": true, "score": 0.99 },
+    "face_match": { "passed": true, "distance": 0.48 },
+    "state": "verified"
+  },
+  "tampering": [{ "index": 0, "tampering_score": 8.2, "is_tampered": false }],
+  "validation_summary": { "expired": false, "errors": [] },
+  "risk_assessment": { "score": 22.5, "decision": "APPROVE", "reasons": [] },
+  "blockchain": { "recorded": true, "screening_id": "d44f0599..." }
 }
+```
+
+### Screening History
+
+```http
+GET /api/v2/history?checkpoint=JFK_01&limit=50
+GET /api/v2/history/{screening_id}
+GET /api/v2/screening/{screening_session_id}/state
+```
+
+### Legacy (deprecated, still works)
+
+```http
+POST /api/v2/screen    # single-shot: document + live_photo
 ```
 
 ---
 
-## 🧭 Project Structure
+## Blockchain Setup
+
+The system writes to a single channel `screening-channel` running **chaincode `screening` v1.0** with CouchDB as the state store and a private data collection for PII.
+
+### Version Requirements
+
+| Component | Version |
+|---|---|
+| Docker | 24.0.9 (Docker 29 breaks Fabric's chaincode builder) |
+| docker-compose | 2.24.5 |
+| Fabric binaries | 2.5.0 |
+| fabric-samples | v2.4.9 |
+| Go | 1.20.14 |
+| Chaincode SDK | `fabric-chaincode-go` (no `/v2`) |
+
+### Common pitfalls
+
+| Don't | Why |
+|---|---|
+| `./network.sh up ...` **without** `-s couchdb` | Rich queries fail: `ExecuteQuery not supported for leveldb` |
+| Pass `-ca` to `network.sh up` | Spins up unused CA containers, drops `-s couchdb` silently |
+| Point `-ccp` at `../asset-transfer-basic/...` | Uses demo chaincode, not the screening chaincode |
+| Forget `-cccg .../collections_config.json` | PII writes fail: `collection ... could not be found` |
+| Run `network.sh down` casually | Wipes every ledger record — no recovery |
+
+See [`docker.md`](docker.md) for the full reproducible setup.
+
+### Daily operations
+
+```bash
+# Restart after reboot (fast — no state loss)
+docker start orderer.example.com peer0.org1.example.com peer0.org2.example.com \
+             couchdb0 couchdb1 cli
+
+# Verify chaincode is still live
+cd ~/Documents/project/fabric-samples/test-network
+export PATH="$HOME/Documents/project/fabric-samples/bin:$PATH"
+export FABRIC_CFG_PATH="$HOME/Documents/project/fabric-samples/config"
+source ./scripts/envVar.sh && setGlobals 1
+peer lifecycle chaincode querycommitted --channelID screening-channel --name screening
+
+# Query the ledger from CLI
+peer chaincode query -C screening-channel -n screening \
+  -c '{"Args":["QueryScreeningsByCheckpoint","JFK_01"]}'
+```
+
+---
+
+## Project Structure
 
 ```
 project/
-├── backend/                          # Python FastAPI backend
-│   ├── main.py                       # Entry point
-│   ├── requirements.txt              # Dependencies
+├── backend/
+│   ├── main.py                          # FastAPI app + lifespan
+│   ├── app/
+│   │   ├── routers/
+│   │   │   ├── documents.py             # Stages 1 + 2
+│   │   │   ├── liveness.py              # Frame loop + PAD + face match
+│   │   │   ├── screening_finalize.py    # start-liveness + finalize + state
+│   │   │   └── screening_history.py     # Ledger read-throughs
+│   │   ├── core/
+│   │   │   ├── redis.py                 # Wrapped Redis client
+│   │   │   ├── session.py               # Liveness session store
+│   │   │   └── session_store.py         # Screening session store
+│   │   └── schemas/
+│   │       └── session.py               # Session Pydantic models
 │   ├── services/
-│   │   ├── ocr_service.py           # OCR + classification
-│   │   ├── tampering_service.py     # 5-signal tampering detection
-│   │   ├── face_service.py          # InsightFace verification
-│   │   ├── image_quality_service.py # Quality gate
-│   │   ├── enhancement_service.py   # Image enhancement
-│   │   └── validation_service.py    # Field validation
+│   │   ├── pipeline.py                  # DocumentPipeline class
+│   │   ├── ocr_service.py
+│   │   ├── tampering_service.py
+│   │   ├── face_service.py
+│   │   ├── image_quality_service.py
+│   │   ├── enhancement_service.py
+│   │   ├── anti_spoof.py                # MiniFASNetV2 + heuristics
+│   │   └── screen_detector.py           # Flicker/moiré replay check
 │   ├── risk_engine/
-│   │   └── scorer.py                # Risk scoring logic
-│   ├── tampering_dl/
-│   │   ├── infer.py                 # TamperNet CNN inference
-│   │   └── train.py                 # Training script
+│   │   └── scorer.py
 │   ├── blockchain/
-│   │   └── client.py                # Fabric integration
-│   └── models/                      # Pretrained model weights
+│   │   └── client.py                    # `peer chaincode invoke` wrapper
+│   └── models/
+│       ├── doc_classifier.pt
+│       ├── anti_spoof.onnx
+│       └── insightface/
 │
-├── frontend-vite/                    # React + Vite frontend
-│   ├── src/
-│   │   ├── App.jsx                  # Main component
-│   │   ├── components/
-│   │   └── pages/
+├── frontend-vite/
+│   ├── index.html
 │   ├── package.json
-│   └── vite.config.js
+│   ├── tailwind.config.js
+│   ├── vite.config.js                   # /api + /liveness proxy → :8000
+│   ├── public/favicon.svg
+│   └── src/
+│       ├── main.jsx
+│       ├── App.jsx
+│       ├── index.css
+│       ├── api/client.js
+│       └── components/
+│           ├── Navbar.jsx
+│           ├── Hero.jsx
+│           ├── Sections.jsx
+│           ├── Footer.jsx
+│           ├── ScreeningHistory.jsx
+│           ├── ui/index.jsx
+│           └── wizard/
+│               ├── Wizard.jsx
+│               ├── StepTabs.jsx
+│               ├── Step1Upload.jsx
+│               ├── Step2Liveness.jsx
+│               └── Step3Results.jsx
 │
-├── chaincode/                        # Hyperledger Fabric chaincode
+├── fabric-samples/
+│   ├── test-network/                    # Fabric network orchestration
 │   └── screening-chaincode-go/
-│       ├── screening.go             # Smart contract logic
+│       ├── screening.go                 # Chaincode
 │       ├── go.mod
-│       ├── go.sum
-│       ├── collections_config.json  # Private data config
-│       └── META-INF/
+│       └── collections_config.json      # PDC definition
 │
-├── enhancers/                        # Image enhancement tools
-│   ├── AI_enhance/                  # Zero-DCE + DPRNet
-│   ├── Real-ESRGAN/                 # Super-resolution upscaling
-│   └── Document-Image-Dewarping/    # Perspective correction
+├── enhancers/
+│   ├── AI_enhance/                      # Zero-DCE
+│   ├── Real-ESRGAN/                     # Super-resolution (warm on :8766)
+│   └── Document-Image-Dewarping/        # Perspective correction (warm on :8765)
 │
-└── README.md
+├── docker.md                            # Fabric setup, reproducible
+└── readme.md
 ```
 
 ---
 
-## 📈 Performance
+## Configuration
 
-### Latency Breakdown (per request)
+### Backend thresholds
 
-| Stage | Time (CPU) | Time (GPU) |
-|-------|-----------|-----------|
-| Quality Gate | 50-200ms | 50-200ms |
-| OCR + Classification | 1.5-2.5s | 500-800ms |
-| Tampering Detection | 1.5-4s | 500-1s |
-| Face Verification | 800-1500ms | 100-200ms |
-| Risk Scoring | <10ms | <10ms |
-| Blockchain | 500-2s | 500-2s |
-| **TOTAL** | **5-7s** | **2-4s** |
+| File | Constant | Default | Meaning |
+|---|---|---|---|
+| `risk_engine/scorer.py` | `APPROVE_THRESHOLD` | 30 | score < 30 → APPROVE |
+| `risk_engine/scorer.py` | `DENY_THRESHOLD` | 70 | score > 70 → DENY |
+| `services/face_service.py` | `FACE_THRESHOLD` | 0.55 | cosine similarity floor |
+| `services/anti_spoof.py` | `predict()` | 0.65 | MiniFASNetV2 live-class threshold |
 
-### Memory Usage
-
-| Component | Size |
-|-----------|------|
-| PaddleOCR | 200 MB |
-| TrOCR | 350 MB |
-| InsightFace | 150 MB |
-| TamperNet | 50 MB |
-| EfficientNet-B0 | 20 MB |
-| **Total (idle)** | **770 MB** |
-| **Peak per request** | **820-900 MB** |
-
-### GPU Acceleration
-
-- **4-5× speedup** with NVIDIA GPU (4+ GB VRAM)
-- PaddleOCR: 1s → 300ms
-- Face embeddings: 800ms → 100ms
-- TamperNet CNN: 300ms → 50ms
-
----
-
-## 🔒 Security Features
-
-✅ **Input Validation**
-- MIME type whitelist (JPEG, PNG, WebP)
-- File size limit (10 MB)
-- Image corruption detection
-
-✅ **Multi-Signal Tampering Detection**
-- No single signal is sufficient
-- Attacker must defeat 5 independent detectors
-- Probability of systematic bypass ≈ product of individual rates
-
-✅ **Blockchain Immutability**
-- Cryptographic hashing
-- Digital signatures (checkpoint-verified)
-- Append-only ledger
-- Smart contract validation rules
-
-✅ **PII Protection (GDPR-Compliant)**
-- Sensitive data encrypted in private collection
-- Blockchain stores only hashes
-- 90-day retention with auto-purge
-- Access logging and audit trail
-
-⚠️ **Known Limitations (Development)**
-- No authentication (use API gateway in production)
-- No rate limiting (add in production)
-- Open CORS (restrict in production)
-- Models can be adversarially evaded (use with human review)
-
----
-
-## 🛠️ Configuration
-
-### Hardcoded Thresholds
-
-Edit these in the source code for your use case:
-
-```python
-# risk_engine/scorer.py
-APPROVE_THRESHOLD = 30      # score < 30: auto-approve
-DENY_THRESHOLD = 70         # score > 70: auto-deny
-
-# services/face_service.py
-FACE_THRESHOLD = 0.55       # similarity threshold
-
-# services/tampering_service.py
-IS_TAMPERED_THRESHOLD = 0.45  # tampering score threshold
-
-# services/image_quality_service.py
-BLUR_THRESH = 100.0         # Laplacian variance floor
-SKEW_THRESH_DEG = 8.0       # max acceptable tilt
-DARK_PCT_THRESH = 45.0      # max % pixels too dark
-```
-
-### Environment Variables
+### Environment variables
 
 ```bash
-# GPU usage (auto-detected)
-export CUDA_VISIBLE_DEVICES=0
-
-# Debug mode (show OCR lines in response)
-export DEBUG_OCR=true
-
-# Blockchain config
-export FABRIC_CFG_PATH=~/Documents/project/fabric-samples/config
-export FABRIC_PEER_ADDR=localhost:7051
+export FABRIC_CFG_PATH="$HOME/Documents/project/fabric-samples/config"
+export PATH="$HOME/Documents/project/fabric-samples/bin:$PATH"
+export DEBUG_OCR=true                # optional — include raw OCR lines in response
+export CUDA_VISIBLE_DEVICES=0        # optional — pin to a specific GPU
 ```
 
----
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| `ModuleNotFoundError: No module named 'fastapi'` | Activate venv: `source backend/.venv/bin/activate` |
-| `Couldn't instantiate the backend tokenizer ... sentencepiece` | `uv pip install sentencepiece` |
-| TrOCR fails after recent install | Pin versions: `uv pip install "transformers==4.44.2" "tokenizers==0.19.1"` |
-| GPU not detected | Install `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118` |
-| `write unix @->/run/docker.sock: broken pipe` | Use Docker 24.0.9 (not 25+) |
-| `undefined: grpc.NewClient` in chaincode | Use fabric-samples v2.4.9 (not main) |
-| Camera permission denied | Grant browser access in settings |
-| Model initialization slow | First run downloads ~2 GB; subsequent runs are cached |
-
-See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for detailed Blockchain setup issues.
+The backend also reads `REDIS_URL` from `backend/app/config.py`.
 
 ---
 
-## 📚 Documentation
+## Known Limitations
 
-- **[CODEBASE_DEEP_DIVE.md](docs/CODEBASE_DEEP_DIVE.md)** — Architecture, data flow, ML models
-- **[IMPROVEMENTS_AND_BLOCKCHAIN.md](docs/IMPROVEMENTS_AND_BLOCKCHAIN.md)** — Enhancement roadmap, Hyperledger integration
-- **[BLOCKCHAIN_SETUP.md](docs/BLOCKCHAIN_SETUP.md)** — Fabric 2.5 installation & deployment
-- **[API_REFERENCE.md](docs/API_REFERENCE.md)** — Detailed endpoint documentation
+**Anti-spoof (PAD)**
+`MiniFASNetV2` was trained on pre-2018 datasets (CASIA-FASD, Replay-Attack). It catches printed photos and low-resolution screen replays, but **misses modern OLED/high-DPI video replays** when the webcam sees the screen from an angle. Mitigations:
+- Blink challenge requires genuine eye movement
+- Face match enforces biometric identity
+- `services/screen_detector.py` adds a flicker/moiré heuristic (can be strengthened)
 
----
+**Blockchain durability**
+The `network.sh down` command deletes all Docker volumes — **every ledger record is destroyed**. There is no automated backup. Treat the current setup as a development/demo ledger, not production storage.
 
-## 🚀 Deployment
+**No authentication**
+The FastAPI backend is open (no API keys, no rate limits). Fine for local dev; requires an API gateway in production.
 
-### Local Development
-
-```bash
-# Start Fabric (if using blockchain)
-cd fabric-samples/test-network
-./network.sh up createChannel -c screening-channel -ca -s couchdb
-
-# Start backend
-cd backend && uvicorn main:app --reload
-
-# Start frontend
-cd frontend-vite && npm run dev
-```
-
-### Docker Compose (Coming Soon)
-
-```bash
-docker-compose -f docker-compose.yml up -d
-```
-
-### Kubernetes (Coming Soon)
-
-See `k8s/` directory for deployment manifests.
-
-### Production Hardening Checklist
-
-- [ ] Add JWT/OAuth2 authentication
-- [ ] Implement rate limiting (e.g., 100 req/hour per IP)
-- [ ] Restrict CORS to specific origins
-- [ ] Enable TLS for all endpoints
-- [ ] Setup centralized logging (ELK stack)
-- [ ] Configure monitoring & alerting (Prometheus + Grafana)
-- [ ] Add API key management
-- [ ] Implement request signing & verification
-- [ ] Setup backup strategy for blockchain ledger
-- [ ] Configure firewall rules
-- [ ] Run security audit
-- [ ] Setup incident response procedures
+**Session cleanup**
+Screening sessions live 30 minutes (Redis TTL) and are swept from disk by `screening_session_store.sweep_stale()`. Liveness sessions share the same TTL.
 
 ---
 
-## 📊 Supported Document Types
+## Roadmap
 
-| Document | Fields Extracted | MRZ Zone | Validation |
-|----------|-----------------|----------|-----------|
-| **Passport** | Name, DOB, passport #, expiry, nationality, gender | ✅ Yes | Checksum, expiry |
-| **Visa** | Visa #, type, entry date, expiry, duration | ✅ Yes | Expiry, consistency |
-| **Aadhaar** | Name, DOB, gender, Aadhaar # | ❌ No | Verhoeff checksum |
-| **PAN** | Name, PAN #, DOB | ❌ No | Format validation |
-| **Voter ID** | Name, voter #, DOB | ❌ No | Format validation |
-| **Driving License** | Name, DL #, DOB, license class, expiry | ❌ No | Expiry check |
-| **Permit** | Permit #, issuer, validity period | ❌ No | Expiry check |
+- [ ] Auto-refresh Screening History after finalize
+- [ ] PDF audit-certificate export
+- [ ] Stronger PAD model (AENet / DeepPixBiS)
+- [ ] Docker Compose for the app tier (backend + frontend + Redis)
+- [ ] nginx reverse proxy with TLS for single-origin deployment
+- [ ] Authentication + rate limiting
+- [ ] Persistent ledger volumes that survive `network.sh down`
 
 ---
 
-## 🤝 Contributing
+## License
 
-We welcome contributions! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/improvement`)
-3. Commit changes (`git commit -am 'Add improvement'`)
-4. Push to branch (`git push origin feature/improvement`)
-5. Open a Pull Request
-
-### Code Standards
-
-- Python: PEP 8 (use `black` for formatting)
-- JavaScript: ESLint + Prettier
-- Git: Conventional commits
+MIT — see [LICENSE](LICENSE).
 
 ---
 
-## 📄 License
+## Acknowledgments
 
-This project is licensed under the **MIT License** — see [LICENSE](LICENSE) file for details.
+Built on top of **FastAPI**, **React 19**, **Vite**, **Tailwind**, **PaddleOCR**, **TrOCR**, **InsightFace**, **PyTorch**, and **Hyperledger Fabric**.
 
----
-
-## ⚖️ Legal & Compliance
-
-### Data Protection
-
-- ✅ GDPR-compliant PII handling (private collections, 90-day retention)
-- ✅ Encrypted sensitive data at rest
-- ✅ Audit trail for all data access
-- ✅ Right to deletion support
-
-### Responsible AI
-
-- ⚠️ System includes human review escalation (SECONDARY_INSPECTION)
-- ⚠️ All decisions are explainable (reasons provided)
-- ⚠️ Not suitable for fully autonomous border control
-- ⚠️ Requires trained human operators
-
-### Security
-
-- Intended for **local development** and **demo** usage
-- Not production-ready without:
-  - Authentication (API keys, OAuth2)
-  - Rate limiting
-  - TLS encryption
-  - Security audit
-  - Incident response plan
-
----
-
-## 📞 Support & Contact
-
-- **Issues**: [GitHub Issues](https://github.com/yourusername/ai-border-screening/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/ai-border-screening/discussions)
-- **Email**: support@example.com
-
----
-
-## 🙏 Acknowledgments
-
-Built with:
-- **FastAPI** — Modern Python web framework
-- **React + Vite** — Fast frontend development
-- **PaddleOCR & TrOCR** — OCR engines
-- **InsightFace** — Face recognition
-- **PyTorch** — Deep learning framework
-- **Hyperledger Fabric** — Blockchain infrastructure
-- **CASIA2** — Tampering detection dataset
-
----
-
-## 📈 Roadmap
-
-### Q4 2026
-- [ ] Liveness detection (anti-spoofing)
-- [ ] Multi-modal biometrics (iris + fingerprint)
-- [ ] Continuous model improvement (federated learning)
-- [ ] Advanced fraud intelligence (pattern detection)
-
-### Q1 2027
-- [ ] Multi-language support
-- [ ] Mobile app (iOS + Android)
-- [ ] Advanced analytics dashboard
-- [ ] Integration with government databases
-
-### Q2 2027
-- [ ] Docker Compose deployment
-- [ ] Kubernetes manifests
-- [ ] Commercial licensing model
-- [ ] SLA support program
-
----
-
-## 📊 System Status
-
-| Component | Status | Uptime |
-|-----------|--------|--------|
-| Backend API | ✅ Operational | 99.9% |
-| Frontend | ✅ Operational | 99.9% |
-| Blockchain | ✅ Operational | 99.9% |
-| Models | ✅ Loaded | — |
-
-Last updated: **2026-09-23**
-
----
-
-<div align="center">
-
-**Made with ❤️ for border security**
-
-[⬆ back to top](#ai-based-fake-identity--document-screening-system)
-
-</div>
+Tampering detection training data: **CASIA v2**.
